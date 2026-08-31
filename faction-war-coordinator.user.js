@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.2
+// @version      0.12.4
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -205,40 +205,106 @@
     render();
   }
 
-  function scriptStorageGet(key, fallback = '') {
+  function gmStorageValue(key, fallback = '') {
     try {
-      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
-    } catch (_) {}
+      if (typeof GM_getValue !== 'function') return fallback;
+      const value = GM_getValue(key, fallback);
+      // Some userscript hosts expose Promise-based GM storage. This script's
+      // request path is synchronous, so ignore Promise-like values and use the
+      // localStorage mirror instead.
+      if (value && typeof value.then === 'function') return fallback;
+      return value ?? fallback;
+    } catch (_) { return fallback; }
+  }
+  function localStorageValue(key, fallback = '') {
     try { return localStorage.getItem(key) ?? fallback; } catch (_) { return fallback; }
   }
+  function scriptStorageGet(key, fallback = '') {
+    const gmValue = gmStorageValue(key, '');
+    if (gmValue !== '') return gmValue;
+    return localStorageValue(key, fallback);
+  }
   function scriptStorageSet(key, value) {
+    // Dual-write. Tampermonkey gets durable userscript storage while TornPDA
+    // has a localStorage mirror for hosts where GM storage is partial or
+    // behaves differently.
     try {
-      if (typeof GM_setValue === 'function') { GM_setValue(key, value); return; }
+      if (typeof GM_setValue === 'function') {
+        const result = GM_setValue(key, value);
+        if (result && typeof result.catch === 'function') result.catch(() => {});
+      }
     } catch (_) {}
     try { localStorage.setItem(key, value); } catch (_) {}
   }
   function scriptStorageDelete(key) {
     try {
-      if (typeof GM_deleteValue === 'function') GM_deleteValue(key);
+      if (typeof GM_deleteValue === 'function') {
+        const result = GM_deleteValue(key);
+        if (result && typeof result.catch === 'function') result.catch(() => {});
+      }
     } catch (_) {}
     try { localStorage.removeItem(key); } catch (_) {}
   }
   function migrateAuthStorage() {
     try {
-      const gmToken = typeof GM_getValue === 'function' ? GM_getValue(TOKEN_KEY, '') : '';
-      const legacyToken = localStorage.getItem(TOKEN_KEY) || '';
-      if (!gmToken && legacyToken) {
-        scriptStorageSet(TOKEN_KEY, legacyToken);
-        scriptStorageDelete(TOKEN_KEY);
-      }
-      const gmName = typeof GM_getValue === 'function' ? GM_getValue(DEVICE_NAME_KEY, '') : '';
-      const legacyName = localStorage.getItem(DEVICE_NAME_KEY) || '';
-      if (!gmName && legacyName) {
-        scriptStorageSet(DEVICE_NAME_KEY, legacyName);
-        localStorage.removeItem(DEVICE_NAME_KEY);
-      }
+      const token = gmStorageValue(TOKEN_KEY, '') || localStorageValue(TOKEN_KEY, '');
+      if (token) scriptStorageSet(TOKEN_KEY, token);
+      const deviceName = gmStorageValue(DEVICE_NAME_KEY, '') || localStorageValue(DEVICE_NAME_KEY, '');
+      if (deviceName) scriptStorageSet(DEVICE_NAME_KEY, deviceName);
     } catch (_) {}
   }
+
+  function fwcHttpRequest(options) {
+    const method = String(options.method || 'GET').toUpperCase();
+    const headers = options.headers || {};
+    const url = options.url;
+    const body = options.data ?? '';
+
+    const nativeGet = typeof PDA_httpGet === 'function' ? PDA_httpGet : null;
+    const nativePost = typeof PDA_httpPost === 'function' ? PDA_httpPost : null;
+    const canUsePda = (method === 'GET' && nativeGet) || (method === 'POST' && nativePost);
+
+    if (!canUsePda) {
+      return GM_xmlhttpRequest(options);
+    }
+
+    let settled = false;
+    const timeoutMs = Number(options.timeout || 0);
+    let timer = null;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (typeof options.ontimeout === 'function') options.ontimeout();
+      }, timeoutMs);
+    }
+
+    const request = method === 'GET'
+      ? nativeGet(url, headers)
+      : nativePost(url, headers, body);
+
+    Promise.resolve(request).then(response => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (typeof options.onload === 'function') {
+        options.onload({
+          status: Number(response?.status || 0),
+          statusText: String(response?.statusText || ''),
+          responseText: String(response?.responseText || ''),
+          responseHeaders: String(response?.responseHeaders || '')
+        });
+      }
+    }).catch(error => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (typeof options.onerror === 'function') options.onerror(error);
+    });
+
+    return null;
+  }
+
   function authToken() { return String(scriptStorageGet(TOKEN_KEY, '') || ''); }
   function authHeaders(extra = {}) {
     const token = authToken();
@@ -263,7 +329,7 @@
     if (!code) return;
     const remembered = scriptStorageGet(DEVICE_NAME_KEY, '') || defaultDeviceName();
     const deviceName = prompt('Name this device:', remembered) || remembered;
-    GM_xmlhttpRequest({
+    fwcHttpRequest({
       method: 'POST', url: AUTH_REDEEM_URL,
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ code, device_name: deviceName }), timeout: 8000,
@@ -299,7 +365,7 @@
 
     writePending = true;
     render();
-    GM_xmlhttpRequest({
+    fwcHttpRequest({
       method: 'POST',
       url: action === 'join' ? JOIN_URL : LEAVE_URL,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -350,7 +416,7 @@
     writePending = true;
     closeRotationEditor();
     render();
-    GM_xmlhttpRequest({
+    fwcHttpRequest({
       method: 'POST',
       url: `${COORD_BASE_URL}/replace`,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -408,7 +474,7 @@
     writePending = true;
     closeOverlay();
     render();
-    GM_xmlhttpRequest({
+    fwcHttpRequest({
       method: 'POST',
       url: `${COORD_BASE_URL}/${action}`,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -447,7 +513,7 @@
   function requestState() {
     if (!enabled()) return;
     viewerTornId = detectViewerTornId() || viewerTornId;
-    GM_xmlhttpRequest({
+    fwcHttpRequest({
       method: 'GET',
       url: API_URL,
       headers: authHeaders(),
