@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.8
+// @version      0.12.9
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -42,6 +42,8 @@
 
   let rotation = [];
   let chainSeconds = null;
+  let chainDeadlineAt = null;
+  let chainTickTimer = null;
   let viewerTornId = null;
   let apiOnline = false;
   let lastError = '';
@@ -79,6 +81,29 @@
     return `${minutes}:${String(secs).padStart(2, '0')}`;
   }
 
+
+  function currentChainSeconds() {
+    if (chainDeadlineAt === null) return chainSeconds;
+    return Math.max(0, Math.ceil((chainDeadlineAt - Date.now()) / 1000));
+  }
+
+  function updateChainTimerDisplay() {
+    const timer = document.querySelector(`#${ROOT_ID} .frt-timer strong`);
+    if (!timer) return;
+    timer.textContent = formatChain(currentChainSeconds());
+  }
+
+  function startChainTicker() {
+    stopChainTicker();
+    updateChainTimerDisplay();
+    chainTickTimer = window.setInterval(updateChainTimerDisplay, 250);
+  }
+
+  function stopChainTicker() {
+    if (chainTickTimer !== null) window.clearInterval(chainTickTimer);
+    chainTickTimer = null;
+  }
+
   function roleLabel(m) {
     if (m.role === 'up') return 'UP NOW';
     if (m.role === 'on-deck') return 'ON DECK';
@@ -110,7 +135,19 @@
     if (!joined()) return rotation.slice(0, 3);
     const me = rotation.findIndex(m => m.tornId === viewerTornId);
     if (me < 0) return rotation.slice(0, 3);
-    return [me - 2, me - 1, me].map(i => rotation[(i + rotation.length) % rotation.length]);
+
+    // PDA/mobile shows the viewer plus up to two people immediately ahead,
+    // but never duplicates a member when the rotation contains fewer than 3.
+    const count = Math.min(3, rotation.length);
+    const members = [];
+    for (let offset = count - 1; offset >= 0; offset -= 1) {
+      const index = (me - offset + rotation.length) % rotation.length;
+      const member = rotation[index];
+      if (member && !members.some(existing => existing.rotationUserId === member.rotationUserId)) {
+        members.push(member);
+      }
+    }
+    return members;
   }
 
   function memberHTML(m) {
@@ -159,6 +196,13 @@
     if (!data.ok || !Array.isArray(data.members)) throw new Error(data.error || 'Invalid Coordinator response');
     rotation = data.members.map(normalizeMember);
     chainSeconds = data.chain_seconds;
+    if (chainSeconds === null || chainSeconds === undefined) {
+      chainDeadlineAt = null;
+    } else {
+      // Treat Coordinator time as the authoritative sync point, then let the
+      // browser count down locally between API polls for a smooth timer.
+      chainDeadlineAt = Date.now() + Math.max(0, Number(chainSeconds) || 0) * 1000;
+    }
     canManageRotation = Boolean(data.permissions && data.permissions.manage_rotation);
     if (data.viewer && data.viewer.torn_id) viewerTornId = Number(data.viewer.torn_id);
     authRequired = false;
@@ -964,7 +1008,7 @@
     const root = document.createElement('section');
     root.id = ROOT_ID;
     if (!apiOnline) root.classList.add('frt-offline');
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(chainSeconds))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${authRequired ? ((pdaDeviceProof || !authDiagnostic) ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>' : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>') : `<button type="button" class="frt-joinleave ${joined() ? 'frt-leave' : 'frt-join'}" ${writePending || !apiOnline ? 'disabled' : ''}>${writePending ? 'WORKING…' : (joined() ? 'LEAVE' : 'JOIN')}</button>`}</div></div>`;
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${authRequired ? ((pdaDeviceProof || !authDiagnostic) ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>' : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>') : `<button type="button" class="frt-joinleave ${joined() ? 'frt-leave' : 'frt-join'}" ${writePending || !apiOnline ? 'disabled' : ''}>${writePending ? 'WORKING…' : (joined() ? 'LEAVE' : 'JOIN')}</button>`}</div></div>`;
     document.body.prepend(root);
 
     root.querySelectorAll('.frt-member').forEach(btn => btn.addEventListener('click', e => {
@@ -984,9 +1028,14 @@
   function startPolling() {
     stopPolling();
     if (!enabled()) return;
+    startChainTicker();
     pollTimer = window.setInterval(requestState, POLL_MS);
   }
-  function stopPolling() { if (pollTimer !== null) window.clearInterval(pollTimer); pollTimer = null; }
+  function stopPolling() {
+    if (pollTimer !== null) window.clearInterval(pollTimer);
+    pollTimer = null;
+    stopChainTicker();
+  }
 
   document.addEventListener('pointerdown', e => {
     const ov = document.getElementById(OVERLAY_ID);
