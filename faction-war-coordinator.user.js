@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.6
+// @version      0.12.7
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -136,6 +136,8 @@
   function normalizeMember(raw) {
     const target = raw.target && typeof raw.target === 'object' ? raw.target : null;
     return {
+      // Rotation/Discord IDs are transported as strings because Discord
+      // snowflakes exceed JavaScript's Number.MAX_SAFE_INTEGER.
       rotationUserId: String(raw.rotation_user_id ?? raw.discord_user_id ?? ''),
       tornId: raw.torn_id === null || raw.torn_id === undefined ? null : Number(raw.torn_id),
       name: String(raw.name || 'Unknown'),
@@ -166,10 +168,16 @@
     lastError = '';
     consecutiveFailures = 0;
     lastSuccessAt = Date.now();
+
     if (options.persist !== false) {
       try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify({ saved_at: lastSuccessAt, data }));
-      } catch (_) {}
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          saved_at: lastSuccessAt,
+          data
+        }));
+      } catch (_) {
+        // Cache failure should never affect the live ticker.
+      }
     }
   }
 
@@ -179,17 +187,26 @@
       if (!cached || !cached.data || !cached.saved_at) return false;
       const age = Date.now() - Number(cached.saved_at);
       if (!Number.isFinite(age) || age < 0 || age > CACHE_MAX_AGE_MS) return false;
+
       applyState(cached.data, { persist: false });
       lastSuccessAt = Number(cached.saved_at);
       return true;
-    } catch (_) { return false; }
+    } catch (_) {
+      return false;
+    }
   }
 
   function handleReadFailure(message) {
     consecutiveFailures += 1;
     lastError = message;
+
     const withinGrace = lastSuccessAt > 0 && (Date.now() - lastSuccessAt) < OFFLINE_GRACE_MS;
-    if (apiOnline && (withinGrace || consecutiveFailures < FAILURES_BEFORE_OFFLINE)) return;
+    if (apiOnline && (withinGrace || consecutiveFailures < FAILURES_BEFORE_OFFLINE)) {
+      // Torn navigation can briefly interrupt a request. Keep the last known
+      // good rotation visible instead of flashing "Coordinator offline".
+      return;
+    }
+
     apiOnline = false;
     render();
   }
@@ -198,6 +215,9 @@
     try {
       if (typeof GM_getValue !== 'function') return fallback;
       const value = GM_getValue(key, fallback);
+      // Some userscript hosts expose Promise-based GM storage. This script's
+      // request path is synchronous, so ignore Promise-like values and use the
+      // localStorage mirror instead.
       if (value && typeof value.then === 'function') return fallback;
       return value ?? fallback;
     } catch (_) { return fallback; }
@@ -211,6 +231,9 @@
     return localStorageValue(key, fallback);
   }
   function scriptStorageSet(key, value) {
+    // Dual-write. Tampermonkey gets durable userscript storage while TornPDA
+    // has a localStorage mirror for hosts where GM storage is partial or
+    // behaves differently.
     try {
       if (typeof GM_setValue === 'function') {
         const result = GM_setValue(key, value);
@@ -245,20 +268,86 @@
     const sw = Number(screen?.width || 0);
     const sh = Number(screen?.height || 0);
     const dims = [sw, sh].sort((a, b) => a - b).join('x');
-    return [navigator.userAgent || '', navigator.platform || '', dims, String(window.devicePixelRatio || 1)].join('|');
+    return [
+      navigator.userAgent || '',
+      navigator.platform || '',
+      dims,
+      String(window.devicePixelRatio || 1)
+    ].join('|');
+  }
+
+  function sha256HexFallback(text) {
+    // Pure-JavaScript SHA-256 fallback for TornPDA WebViews where Web Crypto
+    // is unavailable. This hashes locally; the Torn API key is never sent.
+    const k = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    ];
+    let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,
+        h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+    const input = unescape(encodeURIComponent(String(text)));
+    const bytes = Array.from(input, ch => ch.charCodeAt(0));
+    const bitLen = bytes.length * 8;
+    bytes.push(0x80);
+    while ((bytes.length % 64) !== 56) bytes.push(0);
+    const high = Math.floor(bitLen / 0x100000000);
+    const low = bitLen >>> 0;
+    bytes.push((high>>>24)&255,(high>>>16)&255,(high>>>8)&255,high&255,(low>>>24)&255,(low>>>16)&255,(low>>>8)&255,low&255);
+    const rotr = (x,n) => (x>>>n)|(x<<(32-n));
+    for (let offset=0; offset<bytes.length; offset+=64) {
+      const w = new Array(64);
+      for (let i=0;i<16;i++) {
+        const j=offset+i*4;
+        w[i]=((bytes[j]<<24)|(bytes[j+1]<<16)|(bytes[j+2]<<8)|bytes[j+3])>>>0;
+      }
+      for (let i=16;i<64;i++) {
+        const s0=(rotr(w[i-15],7)^rotr(w[i-15],18)^(w[i-15]>>>3))>>>0;
+        const s1=(rotr(w[i-2],17)^rotr(w[i-2],19)^(w[i-2]>>>10))>>>0;
+        w[i]=(w[i-16]+s0+w[i-7]+s1)>>>0;
+      }
+      let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+      for (let i=0;i<64;i++) {
+        const S1=(rotr(e,6)^rotr(e,11)^rotr(e,25))>>>0;
+        const ch=((e&f)^((~e)&g))>>>0;
+        const t1=(h+S1+ch+k[i]+w[i])>>>0;
+        const S0=(rotr(a,2)^rotr(a,13)^rotr(a,22))>>>0;
+        const maj=((a&b)^(a&c)^(b&c))>>>0;
+        const t2=(S0+maj)>>>0;
+        h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+      }
+      h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
+      h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+    }
+    return [h0,h1,h2,h3,h4,h5,h6,h7].map(v=>v.toString(16).padStart(8,'0')).join('');
   }
 
   async function sha256Hex(value) {
-    if (!crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable in this TornPDA build.');
-    const bytes = new TextEncoder().encode(value);
-    const digest = await crypto.subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    const subtle = globalThis.crypto && globalThis.crypto.subtle;
+    if (subtle && typeof TextEncoder !== 'undefined') {
+      try {
+        const bytes = new TextEncoder().encode(value);
+        const digest = await subtle.digest('SHA-256', bytes);
+        return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+      } catch (_) {
+        // Fall through to the WebView-safe implementation below.
+      }
+    }
+    return sha256HexFallback(value);
   }
 
   async function initializePdaDeviceProof() {
     pdaDeviceProof = '';
     if (!hasTornPdaApiKey()) return;
     try {
+      // The raw Torn API key never leaves this device. Only this one-way proof
+      // is sent to the Coordinator. It is recreated after every PDA restart,
+      // removing any dependence on Torn page localStorage.
       const seed = `fwc-pda-v1|${PDA_API_KEY}|${stablePdaFingerprint()}`;
       pdaDeviceProof = `pda_${await sha256Hex(seed)}`;
     } catch (err) {
@@ -267,13 +356,16 @@
     }
   }
 
-  function hasAuthCredential() { return Boolean(authToken() || pdaDeviceProof); }
+  function hasAuthCredential() {
+    return Boolean(authToken() || pdaDeviceProof);
+  }
 
   function fwcHttpRequest(options) {
     const method = String(options.method || 'GET').toUpperCase();
     const headers = options.headers || {};
     const url = options.url;
     const body = options.data ?? '';
+
     const nativeGet = typeof PDA_httpGet === 'function' ? PDA_httpGet : null;
     const nativePost = typeof PDA_httpPost === 'function' ? PDA_httpPost : null;
     const canUsePda = (method === 'GET' && nativeGet) || (method === 'POST' && nativePost);
@@ -293,15 +385,19 @@
     let settled = false;
     const timeoutMs = Number(options.timeout || 0);
     let timer = null;
-    if (timeoutMs > 0) timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      if (typeof options.ontimeout === 'function') options.ontimeout();
-    }, timeoutMs);
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (typeof options.ontimeout === 'function') options.ontimeout();
+      }, timeoutMs);
+    }
 
     let request;
     try {
-      request = method === 'GET' ? nativeGet(url, headers) : nativePost(url, headers, body);
+      request = method === 'GET'
+        ? nativeGet(url, headers)
+        : nativePost(url, headers, body);
     } catch (error) {
       if (timer) clearTimeout(timer);
       settled = true;
@@ -313,24 +409,34 @@
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+
+      // TornPDA has changed its response wrapper across versions. Capture and
+      // normalize several likely field names, but retain the raw key list for
+      // diagnostics so we can see what this particular PDA build returned.
       const statusCandidate = response?.status ?? response?.statusCode ?? response?.code ?? response?.httpStatus ?? 0;
       const textCandidate = response?.responseText ?? response?.body ?? response?.data ?? response?.response ?? '';
-      const normalizedText = typeof textCandidate === 'string' ? textCandidate : (() => { try { return JSON.stringify(textCandidate ?? ''); } catch (_) { return String(textCandidate ?? ''); } })();
-      if (typeof options.onload === 'function') options.onload({
-        status: Number(statusCandidate || 0),
-        statusText: String(response?.statusText ?? response?.message ?? ''),
-        responseText: normalizedText,
-        responseHeaders: String(response?.responseHeaders ?? response?.headers ?? ''),
-        _fwcTransport: transport,
-        _fwcRawKeys: response && typeof response === 'object' ? Object.keys(response).sort() : [],
-        _fwcRawType: Object.prototype.toString.call(response)
-      });
+      const normalizedText = typeof textCandidate === 'string'
+        ? textCandidate
+        : (() => { try { return JSON.stringify(textCandidate ?? ''); } catch (_) { return String(textCandidate ?? ''); } })();
+
+      if (typeof options.onload === 'function') {
+        options.onload({
+          status: Number(statusCandidate || 0),
+          statusText: String(response?.statusText ?? response?.message ?? ''),
+          responseText: normalizedText,
+          responseHeaders: String(response?.responseHeaders ?? response?.headers ?? ''),
+          _fwcTransport: transport,
+          _fwcRawKeys: response && typeof response === 'object' ? Object.keys(response).sort() : [],
+          _fwcRawType: Object.prototype.toString.call(response)
+        });
+      }
     }).catch(error => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (typeof options.onerror === 'function') options.onerror(error);
     });
+
     return null;
   }
 
@@ -350,7 +456,6 @@
     if (/Macintosh/i.test(ua)) return 'Mac browser';
     return 'Torn userscript device';
   }
-
   function clearAuth({ deleteToken = true } = {}) {
     if (deleteToken) scriptStorageDelete(TOKEN_KEY);
     authRequired = true;
@@ -364,7 +469,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.12.6`,
+      `Version: 0.12.5`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -382,13 +487,14 @@
       transport: String(response?._fwcTransport || 'unknown'),
       tokenPresent: Boolean(token),
       tokenLength: token.length,
-      pdaProofPresent: Boolean(pdaDeviceProof),
       httpStatus: Number(response?.status ?? 0),
       authRequired: Boolean(data && data.auth_required),
       serverError: String(data?.error || ''),
       responseKeys: Array.isArray(response?._fwcRawKeys) ? response._fwcRawKeys : [],
       responsePreview: String(response?.responseText || '').slice(0, 240).replace(/\s+/g, ' ')
     };
+    // Diagnostic build deliberately preserves the token. A single rejected
+    // request must not destroy the evidence we are trying to inspect.
     clearAuth({ deleteToken: false });
     lastError = diagnosticSummary();
     if (!authDiagnosticAlerted) {
@@ -396,7 +502,6 @@
       setTimeout(() => alert(diagnosticDetails()), 50);
     }
   }
-
   function linkDevice() {
     const code = prompt('Enter the one-time code from Discord /userscript link:');
     if (!code) return;
@@ -428,9 +533,16 @@
   function rotationAction(action) {
     if (writePending) return;
     viewerTornId = detectViewerTornId() || viewerTornId;
-    if (!viewerTornId) { alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.'); return; }
-    if (!apiOnline) { alert('The Coordinator is currently offline. Start the bot and try again.'); return; }
+    if (!viewerTornId) {
+      alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.');
+      return;
+    }
+    if (!apiOnline) {
+      alert('The Coordinator is currently offline. Start the bot and try again.');
+      return;
+    }
     if (action === 'join' && !confirm('Join the active rotation?')) return;
+
     writePending = true;
     render();
     fwcHttpRequest({
@@ -443,32 +555,68 @@
         writePending = false;
         try {
           const data = JSON.parse(response.responseText || '{}');
-          if (response.status < 200 || response.status >= 300 || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-          applyState(data); render();
-        } catch (err) { lastError = String(err?.message || err); render(); alert(`Rotation ${action} failed: ${lastError}`); }
+          if (response.status < 200 || response.status >= 300 || !data.ok) {
+            throw new Error(data.error || `HTTP ${response.status}`);
+          }
+          applyState(data);
+          render();
+        } catch (err) {
+          lastError = String(err?.message || err);
+          render();
+          alert(`Rotation ${action} failed: ${lastError}`);
+        }
       },
-      onerror: () => { writePending = false; lastError = 'Coordinator API unavailable'; render(); alert(`Rotation ${action} failed: ${lastError}`); },
-      ontimeout: () => { writePending = false; lastError = 'Coordinator API timed out'; render(); alert(`Rotation ${action} failed: ${lastError}`); }
+      onerror: () => {
+        writePending = false;
+        lastError = 'Coordinator API unavailable';
+        render();
+        alert(`Rotation ${action} failed: ${lastError}`);
+      },
+      ontimeout: () => {
+        writePending = false;
+        lastError = 'Coordinator API timed out';
+        render();
+        alert(`Rotation ${action} failed: ${lastError}`);
+      }
     });
   }
 
   function saveRotationOrder(orderedMembers) {
     if (writePending || !canManageRotation) return;
     viewerTornId = detectViewerTornId() || viewerTornId;
-    if (!viewerTornId) { alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.'); return; }
-    if (!Array.isArray(orderedMembers) || orderedMembers.length !== rotation.length) { alert('The rotation editor is out of date. Close it and reopen Change Rotation.'); return; }
+    if (!viewerTornId) {
+      alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.');
+      return;
+    }
+    if (!Array.isArray(orderedMembers) || orderedMembers.length !== rotation.length) {
+      alert('The rotation editor is out of date. Close it and reopen Change Rotation.');
+      return;
+    }
+
     writePending = true;
-    closeRotationEditor(); render();
+    closeRotationEditor();
+    render();
     fwcHttpRequest({
-      method: 'POST', url: `${COORD_BASE_URL}/replace`, headers: authHeaders({ 'Content-Type': 'application/json' }),
-      data: JSON.stringify({ ordered_rotation_user_ids: orderedMembers.map(member => member.rotationUserId) }), timeout: 8000,
+      method: 'POST',
+      url: `${COORD_BASE_URL}/replace`,
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      data: JSON.stringify({
+        ordered_rotation_user_ids: orderedMembers.map(member => member.rotationUserId)
+      }),
+      timeout: 8000,
       onload: response => {
         writePending = false;
         try {
           const data = JSON.parse(response.responseText || '{}');
-          if (response.status < 200 || response.status >= 300 || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-          applyState(data); render();
-        } catch (err) { alert(`Change Rotation failed: ${String(err?.message || err)}`); requestState(); }
+          if (response.status < 200 || response.status >= 300 || !data.ok) {
+            throw new Error(data.error || `HTTP ${response.status}`);
+          }
+          applyState(data);
+          render();
+        } catch (err) {
+          alert(`Change Rotation failed: ${String(err?.message || err)}`);
+          requestState();
+        }
       },
       onerror: () => { writePending = false; alert('Change Rotation failed: API unavailable'); requestState(); },
       ontimeout: () => { writePending = false; alert('Change Rotation failed: Coordinator API timed out'); requestState(); }
@@ -478,32 +626,67 @@
   function coordinatorAction(action, member) {
     if (writePending || !canManageRotation) return;
     viewerTornId = detectViewerTornId() || viewerTornId;
-    if (!viewerTornId) { alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.'); return; }
-    if (action === 'rotation') { closeOverlay(); openRotationEditor(); return; }
+    if (!viewerTornId) {
+      alert('I could not determine your Torn player ID from this page. Refresh Torn and try again.');
+      return;
+    }
+
+    if (action === 'rotation') {
+      closeOverlay();
+      openRotationEditor();
+      return;
+    }
+
     let position = null;
     if (action === 'move') {
       const answer = prompt(`Move ${member.name} to which rotation position?\n\n1 = Up Now`, String((member.position || 0) + 1));
       if (answer === null) return;
       position = Number(answer);
-      if (!Number.isInteger(position) || position < 1) { alert('Enter a whole-number rotation position starting with 1.'); return; }
+      if (!Number.isInteger(position) || position < 1) {
+        alert('Enter a whole-number rotation position starting with 1.');
+        return;
+      }
     }
     if (action === 'skip' && !confirm(`Skip ${member.name} while preserving their place in the rotation?`)) return;
     if (action === 'resume' && !confirm(`Return ${member.name} to the active rotation in their current place?`)) return;
     if (action === 'remove' && !confirm(`Remove ${member.name} from the rotation?`)) return;
-    writePending = true; closeOverlay(); render();
+
+    writePending = true;
+    closeOverlay();
+    render();
     fwcHttpRequest({
-      method: 'POST', url: `${COORD_BASE_URL}/${action}`, headers: authHeaders({ 'Content-Type': 'application/json' }),
-      data: JSON.stringify({ target_rotation_user_id: member.rotationUserId, position }), timeout: 8000,
+      method: 'POST',
+      url: `${COORD_BASE_URL}/${action}`,
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      data: JSON.stringify({
+        target_rotation_user_id: member.rotationUserId,
+        position
+      }),
+      timeout: 8000,
       onload: response => {
         writePending = false;
         try {
           const data = JSON.parse(response.responseText || '{}');
-          if (response.status < 200 || response.status >= 300 || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-          applyState(data); render();
-        } catch (err) { alert(`Coordinator ${action} failed: ${String(err?.message || err)}`); requestState(); }
+          if (response.status < 200 || response.status >= 300 || !data.ok) {
+            throw new Error(data.error || `HTTP ${response.status}`);
+          }
+          applyState(data);
+          render();
+        } catch (err) {
+          alert(`Coordinator ${action} failed: ${String(err?.message || err)}`);
+          requestState();
+        }
       },
-      onerror: () => { writePending = false; alert(`Coordinator ${action} failed: API unavailable`); requestState(); },
-      ontimeout: () => { writePending = false; alert(`Coordinator ${action} timed out. Check the ticker before retrying.`); requestState(); }
+      onerror: () => {
+        writePending = false;
+        alert(`Coordinator ${action} failed: API unavailable`);
+        requestState();
+      },
+      ontimeout: () => {
+        writePending = false;
+        alert(`Coordinator ${action} timed out. Check the ticker before retrying.`);
+        requestState();
+      }
     });
   }
 
@@ -511,17 +694,27 @@
     if (!enabled()) return;
     viewerTornId = detectViewerTornId() || viewerTornId;
     fwcHttpRequest({
-      method: 'GET', url: API_URL, headers: authHeaders(), timeout: 4000,
+      method: 'GET',
+      url: API_URL,
+      headers: authHeaders(),
+      timeout: 4000,
       onload: response => {
         try {
           const data = JSON.parse(response.responseText || '{}');
           if (response.status === 401 || data.auth_required) { recordAuthDiagnostic(response, data); render(); return; }
           if (response.status < 200 || response.status >= 300) throw new Error(data.error || `HTTP ${response.status}`);
-          applyState(data); render();
-        } catch (err) { handleReadFailure(String(err?.message || err)); }
+          applyState(data);
+          render();
+        } catch (err) {
+          handleReadFailure(String(err?.message || err));
+        }
       },
-      onerror: () => handleReadFailure('Coordinator API unavailable'),
-      ontimeout: () => handleReadFailure('Coordinator API timed out')
+      onerror: () => {
+        handleReadFailure('Coordinator API unavailable');
+      },
+      ontimeout: () => {
+        handleReadFailure('Coordinator API timed out');
+      }
     });
   }
 
@@ -602,6 +795,7 @@
       #${ROTATION_EDITOR_ID} .frt-editor-actions button { min-height:36px; border-radius:5px; border:1px solid #454b53; font-size:10px; font-weight:900; cursor:pointer; }
       #${ROTATION_EDITOR_ID} .frt-editor-save { background:#2e7d4c; color:white; }
       #${ROTATION_EDITOR_ID} .frt-editor-cancel { background:#252a30; color:#f3f5f7; }
+
       @media (max-width:720px) {
         #${ROOT_ID} .frt-bar { grid-template-columns:minmax(0,1fr) auto auto; min-height:42px; }
         #${ROOT_ID} .frt-brand, #${ROOT_ID} .frt-desktop { display:none; }
@@ -627,44 +821,65 @@
   function closeRotationEditor() { document.getElementById(ROTATION_EDITOR_ID)?.remove(); }
 
   function openRotationEditor() {
-    closeOverlay(); closeRotationEditor();
+    closeOverlay();
+    closeRotationEditor();
     if (!canManageRotation) return;
     if (!rotation.length) { alert('The rotation is currently empty.'); return; }
+
     let ordered = rotation.slice();
     let draggedId = null;
     const editor = document.createElement('div');
     editor.id = ROTATION_EDITOR_ID;
-    editor.innerHTML = `<div class="frt-editor-card" role="dialog" aria-modal="true" aria-label="Change Rotation"><div class="frt-editor-head"><div><strong>CHANGE ROTATION</strong><small>Drag members or use ↑ / ↓, then save the complete order.</small></div><button type="button" class="frt-editor-close" aria-label="Close">×</button></div><div class="frt-editor-list"></div><div class="frt-editor-actions"><button type="button" class="frt-editor-cancel">CANCEL</button><button type="button" class="frt-editor-save">SAVE ROTATION</button></div></div>`;
+    editor.innerHTML = `<div class="frt-editor-card" role="dialog" aria-modal="true" aria-label="Change Rotation">
+      <div class="frt-editor-head"><div><strong>CHANGE ROTATION</strong><small>Drag members or use ↑ / ↓, then save the complete order.</small></div><button type="button" class="frt-editor-close" aria-label="Close">×</button></div>
+      <div class="frt-editor-list"></div>
+      <div class="frt-editor-actions"><button type="button" class="frt-editor-cancel">CANCEL</button><button type="button" class="frt-editor-save">SAVE ROTATION</button></div>
+    </div>`;
     document.body.appendChild(editor);
+
     const list = editor.querySelector('.frt-editor-list');
     function redraw() {
-      list.innerHTML = ordered.map((member, index) => `<div class="frt-editor-row" draggable="true" data-id="${esc(member.rotationUserId)}"><span class="frt-editor-number">${index + 1}</span><span class="frt-editor-name"><strong>${esc(member.name)}</strong><span>${index === 0 ? 'UP NOW' : index === 1 ? 'ON DECK' : index === 2 ? 'IN THE HOLE' : `Position ${index + 1}`}</span></span><span class="frt-editor-move"><button type="button" data-shift="-1" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-shift="1" ${index === ordered.length - 1 ? 'disabled' : ''}>↓</button></span></div>`).join('');
+      list.innerHTML = ordered.map((member, index) => `<div class="frt-editor-row" draggable="true" data-id="${esc(member.rotationUserId)}">
+        <span class="frt-editor-number">${index + 1}</span>
+        <span class="frt-editor-name"><strong>${esc(member.name)}</strong><span>${index === 0 ? 'UP NOW' : index === 1 ? 'ON DECK' : index === 2 ? 'IN THE HOLE' : `Position ${index + 1}`}</span></span>
+        <span class="frt-editor-move"><button type="button" data-shift="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move ${esc(member.name)} up">↑</button><button type="button" data-shift="1" ${index === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(member.name)} down">↓</button></span>
+      </div>`).join('');
+
       list.querySelectorAll('[data-shift]').forEach(button => button.addEventListener('click', event => {
         const row = event.currentTarget.closest('.frt-editor-row');
         const index = ordered.findIndex(member => member.rotationUserId === row.dataset.id);
         const next = index + Number(event.currentTarget.dataset.shift);
         if (index < 0 || next < 0 || next >= ordered.length) return;
-        [ordered[index], ordered[next]] = [ordered[next], ordered[index]]; redraw();
+        [ordered[index], ordered[next]] = [ordered[next], ordered[index]];
+        redraw();
       }));
+
       list.querySelectorAll('.frt-editor-row').forEach(row => {
         row.addEventListener('dragstart', event => { draggedId = row.dataset.id; row.classList.add('frt-dragging'); event.dataTransfer.effectAllowed = 'move'; });
         row.addEventListener('dragend', () => { draggedId = null; list.querySelectorAll('.frt-editor-row').forEach(item => item.classList.remove('frt-dragging','frt-drop-before')); });
         row.addEventListener('dragover', event => { event.preventDefault(); if (draggedId && draggedId !== row.dataset.id) row.classList.add('frt-drop-before'); });
         row.addEventListener('dragleave', () => row.classList.remove('frt-drop-before'));
         row.addEventListener('drop', event => {
-          event.preventDefault(); row.classList.remove('frt-drop-before');
+          event.preventDefault();
+          row.classList.remove('frt-drop-before');
           if (!draggedId || draggedId === row.dataset.id) return;
           const from = ordered.findIndex(member => member.rotationUserId === draggedId);
           const to = ordered.findIndex(member => member.rotationUserId === row.dataset.id);
           if (from < 0 || to < 0) return;
-          const [moved] = ordered.splice(from, 1); ordered.splice(to, 0, moved); redraw();
+          const [moved] = ordered.splice(from, 1);
+          ordered.splice(to, 0, moved);
+          redraw();
         });
       });
     }
+
     redraw();
     editor.querySelector('.frt-editor-close').addEventListener('click', closeRotationEditor);
     editor.querySelector('.frt-editor-cancel').addEventListener('click', closeRotationEditor);
-    editor.querySelector('.frt-editor-save').addEventListener('click', () => { if (confirm(`Replace the complete rotation with this ${ordered.length}-member order?`)) saveRotationOrder(ordered); });
+    editor.querySelector('.frt-editor-save').addEventListener('click', () => {
+      if (!confirm(`Replace the complete rotation with this ${ordered.length}-member order?`)) return;
+      saveRotationOrder(ordered);
+    });
     editor.addEventListener('pointerdown', event => { if (event.target === editor) closeRotationEditor(); });
   }
 
@@ -673,32 +888,53 @@
     const targetText = member.target || 'No active assignment';
     const energyText = member.energy === null ? 'Unknown' : member.energy;
     const healthText = member.health === null ? 'Unknown' : `${member.health}%`;
-    const attack = member.attackUrl ? `<a class="frt-attack" href="${esc(member.attackUrl)}">ATTACK ${esc(member.target)}</a>` : `<span class="frt-attack frt-attack-disabled">NO ACTIVE TARGET</span>`;
-    const ov = document.createElement('div'); ov.id = OVERLAY_ID;
-    ov.innerHTML = `<div class="frt-ov-head"><strong>${esc(member.name)}</strong><button type="button" class="frt-close">×</button></div><div class="frt-ov-row"><span>Rotation</span><strong>${esc(roleLabel(member) || 'IN ROTATION')} • ${esc(member.eta)}</strong></div><div class="frt-ov-row"><span>Target</span><strong>${esc(targetText)}</strong></div><div class="frt-ov-row"><span>Energy</span><strong>${esc(energyText)}</strong></div><div class="frt-ov-row"><span>Health</span><strong>${esc(healthText)}</strong></div><div class="frt-ov-row"><span>Status</span><strong>${esc(member.status)}</strong></div>${attack}${canManageRotation ? `<div class="frt-coord-label">COORDINATOR</div><div class="frt-admin"><button type="button" data-coord="rotation">CHANGE ROTATION</button><button type="button" data-coord="move">MOVE</button><button type="button" data-coord="${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'resume' : 'skip'}">${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'RETURN' : 'SKIP'}</button><button type="button" data-coord="remove">REMOVE</button></div>` : ''}`;
+    const attack = member.attackUrl
+      ? `<a class="frt-attack" href="${esc(member.attackUrl)}">ATTACK ${esc(member.target)}</a>`
+      : `<span class="frt-attack frt-attack-disabled">NO ACTIVE TARGET</span>`;
+    const ov = document.createElement('div');
+    ov.id = OVERLAY_ID;
+    ov.innerHTML = `
+      <div class="frt-ov-head"><strong>${esc(member.name)}</strong><button type="button" class="frt-close" aria-label="Close">×</button></div>
+      <div class="frt-ov-row"><span>Rotation</span><strong>${esc(roleLabel(member) || 'IN ROTATION')} • ${esc(member.eta)}</strong></div>
+      <div class="frt-ov-row"><span>Target</span><strong>${esc(targetText)}</strong></div>
+      <div class="frt-ov-row"><span>Energy</span><strong>${esc(energyText)}</strong></div>
+      <div class="frt-ov-row"><span>Health</span><strong>${esc(healthText)}</strong></div>
+      <div class="frt-ov-row"><span>Status</span><strong>${esc(member.status)}</strong></div>
+      ${attack}
+      ${canManageRotation ? `<div class="frt-coord-label">COORDINATOR</div><div class="frt-admin"><button type="button" data-coord="rotation" title="Reorder the complete active rotation.">CHANGE ROTATION</button><button type="button" data-coord="move">MOVE</button><button type="button" data-coord="${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'resume' : 'skip'}">${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'RETURN' : 'SKIP'}</button><button type="button" data-coord="remove">REMOVE</button></div>` : ''}`;
     document.body.appendChild(ov);
-    const r = anchor.getBoundingClientRect(); const w = ov.offsetWidth;
-    let left = r.left + r.width / 2 - w / 2; left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
-    ov.style.left = `${left}px`; ov.style.top = `${Math.min(r.bottom + 6, Math.max(8, window.innerHeight - ov.offsetHeight - 8))}px`;
+    const r = anchor.getBoundingClientRect();
+    const w = ov.offsetWidth;
+    let left = r.left + r.width / 2 - w / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+    ov.style.left = `${left}px`;
+    ov.style.top = `${Math.min(r.bottom + 6, Math.max(8, window.innerHeight - ov.offsetHeight - 8))}px`;
     ov.querySelector('.frt-close').addEventListener('click', closeOverlay);
-    ov.querySelectorAll('[data-coord]').forEach(btn => btn.addEventListener('click', () => coordinatorAction(btn.dataset.coord, member)));
+    ov.querySelectorAll('[data-coord]').forEach(btn => {
+      if (btn.disabled) return;
+      btn.addEventListener('click', () => coordinatorAction(btn.dataset.coord, member));
+    });
   }
 
   function isVisible(el) {
     if (!el) return false;
-    const r = el.getBoundingClientRect(); const style = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
   }
+
   function findTornProfileControl() {
     const selectors = ['a[href*="profiles.php"]','a[href*="sid=User"]','a[title*="profile" i]','button[title*="profile" i]','[aria-label*="profile" i]','[data-testid*="profile" i]'];
     const candidates = [];
     for (const selector of selectors) for (const el of document.querySelectorAll(selector)) {
       if (!isVisible(el)) continue;
-      const r = el.getBoundingClientRect(); if (r.top >= 0 && r.top < 135) candidates.push(el);
+      const r = el.getBoundingClientRect();
+      if (r.top >= 0 && r.top < 135) candidates.push(el);
     }
     candidates.sort((a,b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
     return candidates[0] || null;
   }
+
   function mountOffButton() {
     document.getElementById(OFF_BUTTON_ID)?.remove();
     const btn = document.createElement('button');
@@ -711,20 +947,33 @@
   }
 
   function render() {
-    document.getElementById(ROOT_ID)?.remove(); document.getElementById(OFF_BUTTON_ID)?.remove(); closeOverlay(); addStyles();
+    document.getElementById(ROOT_ID)?.remove();
+    document.getElementById(OFF_BUTTON_ID)?.remove();
+    closeOverlay(); addStyles();
     if (!enabled()) { mountOffButton(); return; }
-    const authText = authDiagnostic ? diagnosticSummary() : 'Device not linked';
+
+    const pdaKeyInjected = hasTornPdaApiKey();
+    const isPdaHost = typeof PDA_httpGet === 'function' || typeof PDA_httpPost === 'function';
+    const authText = authDiagnostic
+      ? diagnosticSummary()
+      : (isPdaHost && !pdaDeviceProof
+          ? `PDA AUTH SETUP · key=${pdaKeyInjected ? 'yes' : 'no'} · proof=no`
+          : 'Device not linked');
     const desktop = authRequired ? `<div class="frt-empty">${esc(authText)}</div>` : (rotation.length ? rotation.map(memberHTML).join('') : `<div class="frt-empty">${apiOnline ? 'No one is currently in the rotation.' : `Coordinator offline${lastError ? ` · ${esc(lastError)}` : ''}`}</div>`);
     const mobile = authRequired ? `<div class="frt-empty">${esc(authText)}</div>` : (rotation.length ? mobileMembers().map(memberHTML).join('') : `<div class="frt-empty">${apiOnline ? 'Rotation empty' : 'Coordinator offline'}</div>`);
-    const root = document.createElement('section'); root.id = ROOT_ID;
+    const root = document.createElement('section');
+    root.id = ROOT_ID;
     if (!apiOnline) root.classList.add('frt-offline');
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(chainSeconds))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${authRequired ? (authDiagnostic ? '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>' : '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>') : `<button type="button" class="frt-joinleave ${joined() ? 'frt-leave' : 'frt-join'}" ${writePending || !apiOnline ? 'disabled' : ''}>${writePending ? 'WORKING…' : (joined() ? 'LEAVE' : 'JOIN')}</button>`}</div></div>`;
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(chainSeconds))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${authRequired ? ((pdaDeviceProof || !authDiagnostic) ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>' : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>') : `<button type="button" class="frt-joinleave ${joined() ? 'frt-leave' : 'frt-join'}" ${writePending || !apiOnline ? 'disabled' : ''}>${writePending ? 'WORKING…' : (joined() ? 'LEAVE' : 'JOIN')}</button>`}</div></div>`;
     document.body.prepend(root);
+
     root.querySelectorAll('.frt-member').forEach(btn => btn.addEventListener('click', e => {
-      const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId)); if (member) openOverlay(member, e.currentTarget);
+      const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId));
+      if (member) openOverlay(member, e.currentTarget);
     }));
     const actionButton = root.querySelector('.frt-joinleave');
     if (actionButton) actionButton.addEventListener('click', () => {
+      if (authRequired && pdaDeviceProof) { linkDevice(); return; }
       if (authRequired && authDiagnostic) { alert(diagnosticDetails()); return; }
       if (authRequired) { linkDevice(); return; }
       rotationAction(joined() ? 'leave' : 'join');
@@ -732,12 +981,18 @@
     root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); setEnabled(false); stopPolling(); render(); });
   }
 
-  function startPolling() { stopPolling(); if (!enabled()) return; pollTimer = window.setInterval(requestState, POLL_MS); }
+  function startPolling() {
+    stopPolling();
+    if (!enabled()) return;
+    pollTimer = window.setInterval(requestState, POLL_MS);
+  }
   function stopPolling() { if (pollTimer !== null) window.clearInterval(pollTimer); pollTimer = null; }
+
   document.addEventListener('pointerdown', e => {
     const ov = document.getElementById(OVERLAY_ID);
     if (ov && !ov.contains(e.target) && !e.target.closest?.(`#${ROOT_ID} .frt-member`)) closeOverlay();
   }, true);
+
   const observer = new MutationObserver(() => {
     viewerTornId = detectViewerTornId() || viewerTornId;
     if (enabled()) { if (!document.getElementById(ROOT_ID)) render(); }
@@ -750,12 +1005,16 @@
     viewerTornId = detectViewerTornId();
     authRequired = !hasAuthCredential();
     if (!authRequired) restoreCachedState();
-    render(); requestState(); startPolling();
+    render();
+    requestState();
+    startPolling();
     observer.observe(document.documentElement, { childList:true, subtree:true });
   }
 
   boot().catch(err => {
     console.error('Faction War Coordinator startup failed', err);
-    authRequired = true; lastError = String(err?.message || err); render();
+    authRequired = true;
+    lastError = String(err?.message || err);
+    render();
   });
 })();
