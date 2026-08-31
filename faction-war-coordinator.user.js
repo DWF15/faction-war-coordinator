@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.7
+// @version      0.12.8
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -261,7 +261,7 @@
   }
 
   function hasTornPdaApiKey() {
-    return PDA_API_KEY && PDA_API_KEY !== '###PDA-APIKEY###' && PDA_API_KEY.length >= 8;
+    return typeof PDA_API_KEY === 'string' && PDA_API_KEY.length >= 8 && !PDA_API_KEY.includes('###');
   }
 
   function stablePdaFingerprint() {
@@ -469,7 +469,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.12.5`,
+      `Version: 0.12.8`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
