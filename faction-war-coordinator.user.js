@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.13.1
+// @version      0.13.2
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -266,9 +266,25 @@
     if (chainSeconds === null || chainSeconds === undefined) {
       chainDeadlineAt = null;
     } else {
-      // Treat Coordinator time as the authoritative sync point, then let the
-      // browser count down locally between API polls for a smooth timer.
-      chainDeadlineAt = Date.now() + Math.max(0, Number(chainSeconds) || 0) * 1000;
+      const serverDeadline = Number(data.chain_deadline_at_ms);
+      const serverSampledAt = Number(data.chain_sampled_at_ms);
+      if (Number.isFinite(serverDeadline) && serverDeadline > 0) {
+        // v0.13.2+: use the Coordinator's absolute deadline. This preserves
+        // the fractional observation time and automatically subtracts the
+        // time spent crossing Funnel/network/WebView before this response
+        // reached the browser.
+        chainDeadlineAt = serverDeadline;
+      } else if (Number.isFinite(serverSampledAt) && serverSampledAt > 0) {
+        // Compatibility fallback for a backend that exposes only the sample
+        // timestamp. Subtract response age instead of restarting a stale
+        // integer countdown on arrival.
+        const responseAgeMs = Math.max(0, Date.now() - serverSampledAt);
+        chainDeadlineAt = Date.now()
+          + Math.max(0, (Number(chainSeconds) || 0) * 1000 - responseAgeMs);
+      } else {
+        // Legacy backend fallback.
+        chainDeadlineAt = Date.now() + Math.max(0, Number(chainSeconds) || 0) * 1000;
+      }
     }
     canManageRotation = Boolean(data.permissions && data.permissions.manage_rotation);
     if (data.viewer && data.viewer.torn_id) viewerTornId = Number(data.viewer.torn_id);
