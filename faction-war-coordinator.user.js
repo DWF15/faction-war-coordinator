@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.13.2
+// @version      0.13.3
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -48,6 +48,7 @@
   let chainSeconds = null;
   let chainDeadlineAt = null;
   let chainTickTimer = null;
+  let maintenanceTimer = null;
   let viewerTornId = null;
   let apiOnline = false;
   let lastError = '';
@@ -97,14 +98,28 @@
     timer.textContent = formatChain(currentChainSeconds());
   }
 
+  function scheduleChainTick() {
+    if (!enabled()) return;
+    updateChainTimerDisplay();
+
+    // The UI only displays whole seconds. Wake once near the next visible
+    // second boundary instead of four times per second. This keeps the timer
+    // fluid while avoiding needless DOM work during Torn combat animations.
+    const remainingMs = chainDeadlineAt === null
+      ? 1000
+      : Math.max(0, chainDeadlineAt - Date.now());
+    const fractional = remainingMs % 1000;
+    const delay = Math.max(100, Math.min(1000, fractional || 1000));
+    chainTickTimer = window.setTimeout(scheduleChainTick, delay);
+  }
+
   function startChainTicker() {
     stopChainTicker();
-    updateChainTimerDisplay();
-    chainTickTimer = window.setInterval(updateChainTimerDisplay, 250);
+    scheduleChainTick();
   }
 
   function stopChainTicker() {
-    if (chainTickTimer !== null) window.clearInterval(chainTickTimer);
+    if (chainTickTimer !== null) window.clearTimeout(chainTickTimer);
     chainTickTimer = null;
   }
 
@@ -259,7 +274,24 @@
     };
   }
 
+  function viewStateSignature() {
+    return JSON.stringify({
+      viewerTornId,
+      canManageRotation,
+      authRequired,
+      apiOnline,
+      lastError,
+      members: rotation.map(m => ({
+        id: m.rotationUserId, tornId: m.tornId, name: m.name, eta: m.eta,
+        target: m.target, targetId: m.targetId, attackUrl: m.attackUrl,
+        energy: m.energy, health: m.health, status: m.status, role: m.role,
+        rotationStatus: m.rotationStatus, position: m.position
+      }))
+    });
+  }
+
   function applyState(data, options = {}) {
+    const previousView = viewStateSignature();
     if (!data.ok || !Array.isArray(data.members)) throw new Error(data.error || 'Invalid Coordinator response');
     rotation = data.members.map(normalizeMember);
     chainSeconds = data.chain_seconds;
@@ -306,6 +338,8 @@
         // Cache failure should never affect the live ticker.
       }
     }
+
+    return previousView !== viewStateSignature();
   }
 
   function restoreCachedState() {
@@ -833,8 +867,9 @@
           const data = JSON.parse(response.responseText || '{}');
           if (response.status === 401 || data.auth_required) { recordAuthDiagnostic(response, data); render(); return; }
           if (response.status < 200 || response.status >= 300) throw new Error(data.error || `HTTP ${response.status}`);
-          applyState(data);
-          render();
+          const viewChanged = applyState(data);
+          if (viewChanged || !document.getElementById(ROOT_ID)) render();
+          else updateChainTimerDisplay();
         } catch (err) {
           handleReadFailure(String(err?.message || err));
         }
@@ -1177,11 +1212,21 @@
     if (ov && !ov.contains(e.target) && !e.target.closest?.(`#${ROOT_ID} .frt-member`)) closeOverlay();
   }, true);
 
-  const observer = new MutationObserver(() => {
-    viewerTornId = detectViewerTornId() || viewerTornId;
-    if (enabled()) { if (!document.getElementById(ROOT_ID)) render(); }
-    else if (!document.getElementById(OFF_BUTTON_ID)) mountOffButton();
-  });
+  function maintenanceCheck() {
+    // Keep SPA navigation resilience without observing every combat/UI mutation.
+    // Polling already refreshes live data every five seconds; this lightweight
+    // check only remounts our own UI if Torn removed it during navigation.
+    if (enabled()) {
+      if (!document.getElementById(ROOT_ID)) render();
+    } else if (!document.getElementById(OFF_BUTTON_ID)) {
+      mountOffButton();
+    }
+  }
+
+  function startMaintenance() {
+    if (maintenanceTimer !== null) window.clearInterval(maintenanceTimer);
+    maintenanceTimer = window.setInterval(maintenanceCheck, 2000);
+  }
 
   async function boot() {
     migrateAuthStorage();
@@ -1192,7 +1237,7 @@
     render();
     requestState();
     startPolling();
-    observer.observe(document.documentElement, { childList:true, subtree:true });
+    startMaintenance();
   }
 
   boot().catch(err => {
