@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.14.4
+// @version      0.15.0
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -72,6 +72,7 @@
   let alertHideTimer = null;
   let audioContext = null;
   let audioRunId = 0;
+  let attackRepeatTimer = null;
 
   const enabled = () => localStorage.getItem(KEY_ENABLED) !== 'false';
   const setEnabled = v => localStorage.setItem(KEY_ENABLED, String(v));
@@ -90,7 +91,9 @@
     audioNext: true,
     audioUpNow: true,
     audioAttackNow: true,
-    audioVolume: 60
+    audioVolume: 60,
+    attackRepeatEnabled: false,
+    attackRepeatDelaySeconds: 15
   });
 
   function loadSettings() {
@@ -266,6 +269,24 @@
     alertHideTimer = window.setTimeout(closeTransitionAlert, def.duration);
   }
 
+  function cancelAttackRepeat() {
+    if (attackRepeatTimer !== null) window.clearTimeout(attackRepeatTimer);
+    attackRepeatTimer = null;
+  }
+
+  function armAttackRepeat() {
+    cancelAttackRepeat();
+    const settings = loadSettings();
+    if (!settings.attackRepeatEnabled) return;
+    const delaySeconds = Math.max(10, Math.min(30, Number(settings.attackRepeatDelaySeconds) || 15));
+    attackRepeatTimer = window.setTimeout(() => {
+      attackRepeatTimer = null;
+      const current = viewerOperationalStage();
+      if (current.stage !== 'attack_now') return;
+      showTransitionAlert('attack_now', 'Still Up Now — the attack window is active.');
+    }, delaySeconds * 1000);
+  }
+
   function viewerOperationalStage() {
     const member = viewerRotationMember();
     if (!member) return { stage: null, detail: '' };
@@ -316,9 +337,11 @@
       return;
     }
     if (current.stage === lastAlertStage) return;
+    cancelAttackRepeat();
     lastAlertStage = current.stage;
     rememberAlertStage(current.stage);
     if (current.stage && alertClaim(current.stage, current.detail)) showTransitionAlert(current.stage, current.detail);
+    if (current.stage === 'attack_now') armAttackRepeat();
     if (rerender && document.getElementById(ROOT_ID)) render();
   }
 
@@ -416,6 +439,11 @@
         <label class="frt-volume-row"><span>Audio volume <b class="frt-volume-value">${Math.max(0, Math.min(100, Number(settings.audioVolume) || 0))}%</b></span><input type="range" min="0" max="100" step="5" data-setting="audioVolume" value="${Math.max(0, Math.min(100, Number(settings.audioVolume) || 0))}"></label>
         <small>Audio is off by default. Use the test buttons below once on each device to verify that browser/PDA audio is permitted.</small><small class="frt-audio-status">Audio test status: not tested on this page.</small>
       </div>
+      <div class="frt-settings-section"><strong>ATTACK NOW ESCALATION</strong>
+        <label><span>Repeat ATTACK NOW once if still Up Now</span><input type="checkbox" data-setting="attackRepeatEnabled" ${settings.attackRepeatEnabled ? 'checked' : ''}></label>
+        <label class="frt-volume-row"><span>Repeat after <b class="frt-repeat-value">${Math.max(10, Math.min(30, Number(settings.attackRepeatDelaySeconds) || 15))}s</b></span><input type="range" min="10" max="30" step="5" data-setting="attackRepeatDelaySeconds" value="${Math.max(10, Math.min(30, Number(settings.attackRepeatDelaySeconds) || 15))}"></label>
+        <small>The repeat is cancelled immediately when you are no longer in ATTACK NOW. It fires at most once per attack window.</small>
+      </div>
       <div class="frt-settings-section"><strong>PREVIEW / TEST ALERTS</strong><div class="frt-preview-grid"><button data-preview="get_ready">GET READY</button><button data-preview="next">YOU'RE NEXT</button><button data-preview="up_now">UP NOW</button><button data-preview="attack_now">ATTACK NOW</button><button data-preview="blocked">NOT READY</button><button data-preview="return_ready">RETURN READY</button></div><small>Preview buttons show the visual alert and play that stage's sound even if audio alerts are currently disabled.</small></div>
       <div class="frt-settings-actions"><button type="button" class="frt-settings-cancel">CANCEL</button><button type="button" class="frt-settings-save">SAVE</button></div>
     </div>`;
@@ -429,11 +457,16 @@
       });
       saveSettings(next);
       if (next.audioAlerts) void primeAudio();
+      cancelAttackRepeat();
+      if (viewerOperationalStage().stage === 'attack_now' && next.attackRepeatEnabled) armAttackRepeat();
       closeSettings();
     });
     const volumeInput = modal.querySelector('input[type="range"][data-setting="audioVolume"]');
     const volumeValue = modal.querySelector('.frt-volume-value');
     volumeInput?.addEventListener('input', () => { if (volumeValue) volumeValue.textContent = `${volumeInput.value}%`; });
+    const repeatInput = modal.querySelector('input[type="range"][data-setting="attackRepeatDelaySeconds"]');
+    const repeatValue = modal.querySelector('.frt-repeat-value');
+    repeatInput?.addEventListener('input', () => { if (repeatValue) repeatValue.textContent = `${repeatInput.value}s`; });
     const audioStatus = modal.querySelector('.frt-audio-status');
     modal.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', async () => {
       const audioReady = await primeAudio();
@@ -1688,7 +1721,7 @@
     });
     root.querySelector('.frt-settings-button')?.addEventListener('click', openSettings);
     root.querySelector('.frt-compact-settings')?.addEventListener('click', openSettings);
-    root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); setEnabled(false); stopPolling(); render(); });
+    root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); cancelAttackRepeat(); setEnabled(false); stopPolling(); render(); });
   }
 
   function startPolling() {
