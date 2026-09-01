@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.15.1
+// @version      0.15.2
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
