@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.13.0
+// @version      0.13.1
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -166,23 +166,42 @@
     return members;
   }
 
+  function attackBlockerFor(m) {
+    const status = String(m.status || '').trim();
+    const lower = status.toLowerCase();
+    const statusIsReady = !status || /^okay$/i.test(status) || /^ready$/i.test(status);
+
+    if (!statusIsReady) {
+      if (/hospital/.test(lower)) return { label: 'HOSPITALIZED', reason: 'You are hospitalized and cannot attack.' };
+      if (/travel|abroad|flying/.test(lower)) return { label: 'TRAVELING', reason: 'You are traveling and cannot attack.' };
+      if (/jail|jailed/.test(lower)) return { label: 'JAILED', reason: 'You are jailed and cannot attack.' };
+      return { label: status.toUpperCase(), reason: `Current status: ${status}` };
+    }
+    if (m.energy !== null && Number(m.energy) < ATTACK_ENERGY_COST) {
+      return { label: 'LOW ENERGY', reason: `${m.energy} energy available; a normal attack costs ${ATTACK_ENERGY_COST}.` };
+    }
+    return null;
+  }
+
   function readinessFor(m) {
     const me = viewerTornId !== null && m.tornId === viewerTornId;
     if (!me) return null;
 
-    const status = String(m.status || '').trim();
-    const statusIsReady = !status || /^okay$/i.test(status) || /^ready$/i.test(status);
-    if (m.rotationStatus === 'skip' || m.rotationStatus === 'away') {
-      return { label: 'SKIPPED', kind: 'paused', title: 'You are currently skipped in the rotation.' };
+    const skipped = m.rotationStatus === 'skip' || m.rotationStatus === 'away';
+    const blocker = attackBlockerFor(m);
+
+    if (skipped) {
+      if (blocker) {
+        return { label: `SKIPPED · ${blocker.label}`, kind: 'paused', title: `${blocker.reason} Stay skipped until this clears.` };
+      }
+      return { label: 'RETURN READY', kind: 'go', action: 'return', title: 'You appear ready to attack again. Tap to return to the active rotation.' };
     }
-    if (!statusIsReady) {
-      return { label: status.toUpperCase(), kind: 'danger', title: `Current status: ${status}` };
-    }
-    if (m.energy !== null && Number(m.energy) < ATTACK_ENERGY_COST) {
-      return { label: 'LOW ENERGY', kind: 'danger', title: `${m.energy} energy available; a normal attack costs ${ATTACK_ENERGY_COST}.` };
+
+    if (blocker) {
+      return { label: `SKIP · ${blocker.label}`, kind: 'danger', action: 'skip', title: `${blocker.reason} Tap to skip yourself while keeping your rotation place.` };
     }
     if (m.health !== null && Number(m.health) <= LOW_HEALTH_PERCENT) {
-      return { label: 'LOW HEALTH', kind: 'warning', title: `Health is ${m.health}%.` };
+      return { label: 'LOW HEALTH', kind: 'warning', title: `Health is ${m.health}%. This is a warning only; you remain active.` };
     }
     if (m.role === 'up') return { label: 'ATTACK NOW', kind: 'go', title: 'You are Up Now.' };
     if (m.role === 'on-deck') return { label: "YOU'RE NEXT", kind: 'next', title: 'You are On Deck.' };
@@ -214,7 +233,7 @@
         ${warning ? '<span class="frt-warn">!</span>' : ''}
       </span>
       <span class="frt-line2">${secondary}</span>
-      ${readiness ? `<span class="frt-readiness" title="${esc(readiness.title)}">${esc(readiness.label)}</span>` : ''}
+      ${readiness ? `<span class="frt-readiness ${readiness.action ? 'frt-readiness-action' : ''}" ${readiness.action ? `data-readiness-action="${readiness.action}"` : ''} title="${esc(readiness.title)}">${esc(readiness.label)}</span>` : ''}
     </button>`;
   }
 
@@ -561,7 +580,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.12.8`,
+      `Version: 0.13.1`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -844,6 +863,8 @@
       #${ROOT_ID} .frt-readiness-next .frt-readiness { background:rgba(85,170,255,.14); color:var(--deck); border:1px solid rgba(85,170,255,.42); }
       #${ROOT_ID} .frt-readiness-go { box-shadow:inset 0 0 0 1px rgba(73,209,125,.28); }
       #${ROOT_ID} .frt-readiness-go .frt-readiness { background:rgba(73,209,125,.18); color:#72e39b; border:1px solid rgba(73,209,125,.58); }
+      #${ROOT_ID} .frt-readiness-action { cursor:pointer; box-shadow:0 0 0 1px rgba(255,255,255,.08); }
+      #${ROOT_ID} .frt-readiness-action:hover { filter:brightness(1.18); }
       #${ROOT_ID} .frt-arrow { color:var(--muted); font-weight:900; }
       #${ROOT_ID} .frt-name { overflow:hidden; text-overflow:ellipsis; }
       #${ROOT_ID} .frt-eta { font-variant-numeric:tabular-nums; }
@@ -1000,6 +1021,10 @@
     const attack = member.attackUrl
       ? `<a class="frt-attack" href="${esc(member.attackUrl)}">ATTACK ${esc(member.target)}</a>`
       : `<span class="frt-attack frt-attack-disabled">NO ACTIVE TARGET</span>`;
+    const readiness = readinessFor(member);
+    const readinessRow = readiness
+      ? `<div class="frt-ov-row"><span>Readiness</span><strong>${esc(readiness.label)}</strong></div>${readiness.action ? `<button type="button" class="frt-attack frt-smart-action" data-self-action="${readiness.action}">${readiness.action === 'skip' ? 'SKIP UNTIL READY' : 'RETURN TO ROTATION'}</button>` : ''}`
+      : '';
     const ov = document.createElement('div');
     ov.id = OVERLAY_ID;
     ov.innerHTML = `
@@ -1009,6 +1034,7 @@
       <div class="frt-ov-row"><span>Energy</span><strong>${esc(energyText)}</strong></div>
       <div class="frt-ov-row"><span>Health</span><strong>${esc(healthText)}</strong></div>
       <div class="frt-ov-row"><span>Status</span><strong>${esc(member.status)}</strong></div>
+      ${readinessRow}
       ${attack}
       ${canManageRotation ? `<div class="frt-coord-label">COORDINATOR</div><div class="frt-admin"><button type="button" data-coord="rotation" title="Reorder the complete active rotation.">CHANGE ROTATION</button><button type="button" data-coord="move">MOVE</button><button type="button" data-coord="${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'resume' : 'skip'}">${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'RETURN' : 'SKIP'}</button><button type="button" data-coord="remove">REMOVE</button></div>` : ''}`;
     document.body.appendChild(ov);
@@ -1019,6 +1045,9 @@
     ov.style.left = `${left}px`;
     ov.style.top = `${Math.min(r.bottom + 6, Math.max(8, window.innerHeight - ov.offsetHeight - 8))}px`;
     ov.querySelector('.frt-close').addEventListener('click', closeOverlay);
+    ov.querySelectorAll('[data-self-action]').forEach(btn => {
+      btn.addEventListener('click', () => { closeOverlay(); rotationAction(btn.dataset.selfAction); });
+    });
     ov.querySelectorAll('[data-coord]').forEach(btn => {
       if (btn.disabled) return;
       btn.addEventListener('click', () => coordinatorAction(btn.dataset.coord, member));
@@ -1088,6 +1117,11 @@
     root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${actionHtml}</div></div>`;
     document.body.prepend(root);
 
+    root.querySelectorAll('[data-readiness-action]').forEach(badge => badge.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      rotationAction(String(e.currentTarget.dataset.readinessAction || ''));
+    }));
     root.querySelectorAll('.frt-target-hit').forEach(target => target.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
