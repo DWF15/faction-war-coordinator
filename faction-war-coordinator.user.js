@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.14.3
+// @version      0.14.4
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -345,6 +345,26 @@
     return `${n}${suffix}`;
   }
 
+  function isHospitalizedMember(member) {
+    const status = String(member?.status || '').trim().toLowerCase();
+    return /hospital/.test(status);
+  }
+
+  function readinessIndicatorHTML(member) {
+    if (!member) return '';
+    if (isHospitalizedMember(member)) {
+      return `<span class="frt-status-icon frt-hospital-icon" title="Hospitalized" aria-label="Hospitalized"><span class="frt-hospital-cross">+</span><span class="frt-hospital-pillow"></span><span class="frt-hospital-bed"></span></span>`;
+    }
+    if (member.energy === null || member.energy === undefined || member.energy === '') return '';
+    const energy = Math.max(0, Number(member.energy) || 0);
+    let level = 'empty';
+    let label = 'No attack energy';
+    if (energy >= 100) { level = 'full'; label = '100 or more energy'; }
+    else if (energy >= 50) { level = 'half'; label = '50 to 99 energy'; }
+    else if (energy >= 25) { level = 'low'; label = '25 to 49 energy'; }
+    return `<span class="frt-status-icon frt-battery frt-battery-${level}" title="${esc(`${energy} energy · ${label}`)}" aria-label="${esc(`${energy} energy · ${label}`)}"><span class="frt-battery-shell"><span class="frt-battery-fill"></span></span><span class="frt-battery-cap"></span></span>`;
+  }
+
   function compactStatus(member) {
     if (!member) return '';
     const readiness = readinessFor(member);
@@ -357,7 +377,7 @@
 
   function compactMemberButton(member, kind) {
     if (!member) return `<span class="frt-compact-person frt-compact-${kind} frt-compact-empty">—</span>`;
-    return `<button type="button" class="frt-compact-person frt-compact-${kind}" data-rotation-id="${esc(member.rotationUserId)}" title="${esc(member.name)}">${esc(member.name)}</button>`;
+    return `<button type="button" class="frt-compact-person frt-compact-${kind}" data-rotation-id="${esc(member.rotationUserId)}" title="${esc(member.name)}"><span class="frt-compact-person-name">${esc(member.name)}</span>${readinessIndicatorHTML(member)}</button>`;
   }
 
   function compactViewerRow() {
@@ -368,7 +388,7 @@
     const status = compactStatus(member);
     const skipped = viewerIsSkipped();
     const state = [ordinal(place), skipped ? 'SKIPPED' : '', status].filter(Boolean).join(' · ');
-    return `<button type="button" class="frt-compact-me" data-rotation-id="${esc(member.rotationUserId)}"><span class="frt-compact-me-name">${esc(member.name)}</span><span class="frt-compact-you">YOU</span><span class="frt-compact-me-state">${esc(state)}</span></button>`;
+    return `<button type="button" class="frt-compact-me" data-rotation-id="${esc(member.rotationUserId)}"><span class="frt-compact-me-name">${esc(member.name)}</span>${readinessIndicatorHTML(member)}<span class="frt-compact-you">YOU</span><span class="frt-compact-me-state">${esc(state)}</span></button>`;
   }
 
   function openSettings() {
@@ -611,6 +631,7 @@
     return `<button type="button" class="frt-member frt-${m.role} ${me ? 'frt-me' : ''} ${readiness ? `frt-readiness-${readiness.kind}` : ''}" data-rotation-id="${m.rotationUserId}">
       <span class="frt-line1">
         <span class="frt-name">${esc(m.name)}</span>
+        ${readinessIndicatorHTML(m)}
         ${me ? '<span class="frt-you">YOU</span>' : ''}
         <span class="frt-dot">•</span>
         <span class="frt-eta">${esc(m.eta)}</span>
@@ -1270,6 +1291,24 @@
       #${ROOT_ID} .frt-desktop, #${ROOT_ID} .frt-mobile { display:flex; min-width:0; align-items:stretch; }
       #${ROOT_ID} .frt-mobile { display:none; }
       #${ROOT_ID} .frt-compact { display:none; }
+      #${ROOT_ID} .frt-status-icon { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; vertical-align:middle; margin-left:4px; }
+      #${ROOT_ID} .frt-battery { position:relative; width:17px; height:9px; }
+      #${ROOT_ID} .frt-battery-shell { position:absolute; left:0; top:1px; width:14px; height:7px; border:1px solid #aeb6bd; border-radius:2px; overflow:hidden; box-sizing:border-box; }
+      #${ROOT_ID} .frt-battery-cap { position:absolute; right:0; top:3px; width:2px; height:4px; border-radius:0 1px 1px 0; background:#aeb6bd; }
+      #${ROOT_ID} .frt-battery-fill { display:block; height:100%; width:0; background:#757d84; }
+      #${ROOT_ID} .frt-battery-full .frt-battery-fill { width:100%; background:#45cf7a; }
+      #${ROOT_ID} .frt-battery-half .frt-battery-fill { width:58%; background:#e0be48; }
+      #${ROOT_ID} .frt-battery-low .frt-battery-fill { width:30%; background:#e38439; }
+      #${ROOT_ID} .frt-battery-empty .frt-battery-fill { width:0; }
+      #${ROOT_ID} .frt-battery-empty .frt-battery-shell { border-color:#ef6666; }
+      #${ROOT_ID} .frt-battery-empty .frt-battery-cap { background:#ef6666; }
+      #${ROOT_ID} .frt-hospital-icon { position:relative; width:18px; height:11px; margin-left:4px; }
+      #${ROOT_ID} .frt-hospital-bed { position:absolute; left:1px; bottom:1px; width:16px; height:5px; border:1px solid #d9dde0; border-top:0; box-sizing:border-box; }
+      #${ROOT_ID} .frt-hospital-bed::before, #${ROOT_ID} .frt-hospital-bed::after { content:''; position:absolute; bottom:-3px; width:1px; height:3px; background:#d9dde0; }
+      #${ROOT_ID} .frt-hospital-bed::before { left:1px; }
+      #${ROOT_ID} .frt-hospital-bed::after { right:1px; }
+      #${ROOT_ID} .frt-hospital-pillow { position:absolute; left:2px; bottom:5px; width:5px; height:3px; border:1px solid #d9dde0; border-radius:2px 2px 0 0; box-sizing:border-box; }
+      #${ROOT_ID} .frt-hospital-cross { position:absolute; right:1px; top:-2px; color:#f4f6f7; font-size:9px; font-weight:1000; line-height:9px; }
       #${ROOT_ID} .frt-empty { flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:10px; padding:0 12px; }
       #${ROOT_ID} .frt-member { flex:1 1 0; min-width:112px; max-width:220px; border:0; border-right:1px solid var(--border); border-top:3px solid transparent; background:transparent; color:inherit; padding:3px 7px 4px; cursor:pointer; text-align:center; }
       #${ROOT_ID} .frt-member:hover, #${ROOT_ID} .frt-member:focus-visible { background:rgba(255,255,255,.055); outline:none; }
@@ -1401,13 +1440,16 @@
         #${ROOT_ID} .frt-compact-join { background:#286d45; }
         #${ROOT_ID} .frt-compact-top button:disabled { opacity:.55; }
         #${ROOT_ID} .frt-compact-front { display:grid; grid-template-columns:1fr 1fr; min-height:29px; border-bottom:1px solid var(--border); }
-        #${ROOT_ID} .frt-compact-person { min-width:0; border:0; background:transparent; padding:4px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; font-size:10px; font-weight:900; cursor:pointer; }
+        #${ROOT_ID} .frt-compact-person { min-width:0; border:0; background:transparent; padding:4px 8px; overflow:hidden; white-space:nowrap; text-align:center; font-size:10px; font-weight:900; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:3px; }
+        #${ROOT_ID} .frt-compact-person-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        #${ROOT_ID} .frt-compact-person .frt-status-icon { margin-left:1px; transform:scale(.9); transform-origin:center; }
         #${ROOT_ID} .frt-compact-person + .frt-compact-person { border-left:1px solid var(--border); }
         #${ROOT_ID} .frt-compact-up { color:var(--up); border-top:2px solid var(--up); }
         #${ROOT_ID} .frt-compact-deck { color:var(--deck); border-top:2px solid var(--deck); }
         #${ROOT_ID} .frt-compact-empty { color:#6f777e; cursor:default; }
         #${ROOT_ID} .frt-compact-me { width:100%; min-width:0; min-height:30px; display:flex; align-items:center; justify-content:center; gap:5px; border:0; background:transparent; color:#f3f5f7; padding:4px 8px; cursor:pointer; white-space:nowrap; overflow:hidden; }
         #${ROOT_ID} .frt-compact-me-name { min-width:0; max-width:40%; overflow:hidden; text-overflow:ellipsis; font-size:10px; font-weight:900; }
+        #${ROOT_ID} .frt-compact-me .frt-status-icon { margin-left:0; transform:scale(.9); transform-origin:center; }
         #${ROOT_ID} .frt-compact-you { flex:0 0 auto; padding:1px 3px; border:1px solid var(--me); border-radius:3px; color:var(--me); font-size:6px; font-weight:900; }
         #${ROOT_ID} .frt-compact-me-state { min-width:0; overflow:hidden; text-overflow:ellipsis; color:#b9c0c7; font-size:8px; font-weight:800; }
         #${ROOT_ID} .frt-compact-me-empty { color:#8f979f; cursor:default; }
