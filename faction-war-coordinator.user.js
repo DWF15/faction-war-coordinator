@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.9
+// @version      0.12.10
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -33,6 +33,8 @@
   const AUTH_REDEEM_URL = `${API_ROOT}/api/v1/auth/redeem`;
   const JOIN_URL = `${API_ROOT}/api/v1/rotation/join`;
   const LEAVE_URL = `${API_ROOT}/api/v1/rotation/leave`;
+  const SELF_SKIP_URL = `${API_ROOT}/api/v1/rotation/skip`;
+  const SELF_RETURN_URL = `${API_ROOT}/api/v1/rotation/return`;
   const COORD_BASE_URL = `${API_ROOT}/api/v1/coordinator/rotation`;
   const POLL_MS = 5000;
   const CACHE_KEY = 'frt-last-good-state-v1';
@@ -113,6 +115,18 @@
 
   function joined() {
     return viewerTornId !== null && rotation.some(m => m.tornId === viewerTornId);
+  }
+
+  function viewerRotationMember() {
+    if (viewerTornId === null) return null;
+    return rotation.find(m => m.tornId === viewerTornId) || null;
+  }
+
+  function viewerIsSkipped() {
+    const member = viewerRotationMember();
+    if (!member) return false;
+    const status = String(member.rotationStatus || '').toLowerCase();
+    return status === 'skip' || status === 'away';
   }
 
   function detectViewerTornId() {
@@ -591,7 +605,10 @@
     render();
     fwcHttpRequest({
       method: 'POST',
-      url: action === 'join' ? JOIN_URL : LEAVE_URL,
+      url: action === 'join' ? JOIN_URL
+        : action === 'leave' ? LEAVE_URL
+        : action === 'skip' ? SELF_SKIP_URL
+        : SELF_RETURN_URL,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       data: JSON.stringify({}),
       timeout: 8000,
@@ -796,9 +813,10 @@
       #${ROOT_ID} .frt-timer strong { font-size:14px; font-variant-numeric:tabular-nums; line-height:17px; }
       #${ROOT_ID} .frt-off { border:0; background:transparent; color:var(--muted); font-size:7px; font-weight:800; cursor:pointer; padding:0; }
       #${ROOT_ID} .frt-actions { display:flex; align-items:center; padding:4px 9px; border-left:1px solid var(--border); }
+      #${ROOT_ID} .frt-self-actions { display:flex; align-items:center; gap:5px; }
       #${ROOT_ID} .frt-joinleave { min-width:90px; height:30px; border-radius:5px; border:1px solid var(--border); color:white; font-size:10px; font-weight:900; cursor:pointer; }
       #${ROOT_ID} .frt-joinleave:disabled { opacity:.55; cursor:wait; }
-      #${ROOT_ID} .frt-join { background:#286d45; } #${ROOT_ID} .frt-leave { background:#653535; }
+      #${ROOT_ID} .frt-join { background:#286d45; } #${ROOT_ID} .frt-leave { background:#653535; } #${ROOT_ID} .frt-skip { background:#66551e; } #${ROOT_ID} .frt-return { background:#285f73; }
       #${OFF_BUTTON_ID} { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; min-width:26px; margin-left:5px; padding:0; border:1px solid rgba(255,255,255,.12); border-radius:4px; background:rgba(12,15,18,.90); color:#e8edf1; cursor:pointer; box-sizing:border-box; vertical-align:middle; }
       #${OFF_BUTTON_ID} svg { width:20px; height:20px; display:block; } #${OFF_BUTTON_ID} .frt-chain { stroke:#cfd3d6; } #${OFF_BUTTON_ID} .frt-rotate { stroke:#55c95f; }
       #${OFF_BUTTON_ID}:hover { background:rgba(255,255,255,.08); border-color:rgba(85,201,95,.75); box-shadow:0 0 8px rgba(85,201,95,.28); }
@@ -1008,19 +1026,33 @@
     const root = document.createElement('section');
     root.id = ROOT_ID;
     if (!apiOnline) root.classList.add('frt-offline');
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${authRequired ? ((pdaDeviceProof || !authDiagnostic) ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>' : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>') : `<button type="button" class="frt-joinleave ${joined() ? 'frt-leave' : 'frt-join'}" ${writePending || !apiOnline ? 'disabled' : ''}>${writePending ? 'WORKING…' : (joined() ? 'LEAVE' : 'JOIN')}</button>`}</div></div>`;
+    const disabled = writePending || !apiOnline ? 'disabled' : '';
+    let actionHtml;
+    if (authRequired) {
+      actionHtml = (pdaDeviceProof || !authDiagnostic)
+        ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>'
+        : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>';
+    } else if (!joined()) {
+      actionHtml = `<button type="button" class="frt-joinleave frt-join" data-self-action="join" ${disabled}>${writePending ? 'WORKING…' : 'JOIN'}</button>`;
+    } else {
+      const skipped = viewerIsSkipped();
+      actionHtml = `<div class="frt-self-actions"><button type="button" class="frt-joinleave ${skipped ? 'frt-return' : 'frt-skip'}" data-self-action="${skipped ? 'return' : 'skip'}" ${disabled}>${writePending ? 'WORKING…' : (skipped ? 'RETURN' : 'SKIP')}</button><button type="button" class="frt-joinleave frt-leave" data-self-action="leave" ${disabled}>LEAVE</button></div>`;
+    }
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${actionHtml}</div></div>`;
     document.body.prepend(root);
 
     root.querySelectorAll('.frt-member').forEach(btn => btn.addEventListener('click', e => {
       const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId));
       if (member) openOverlay(member, e.currentTarget);
     }));
-    const actionButton = root.querySelector('.frt-joinleave');
-    if (actionButton) actionButton.addEventListener('click', () => {
+    const linkOrDiagButton = root.querySelector('.frt-link, .frt-diag');
+    if (linkOrDiagButton) linkOrDiagButton.addEventListener('click', () => {
       if (authRequired && pdaDeviceProof) { linkDevice(); return; }
       if (authRequired && authDiagnostic) { alert(diagnosticDetails()); return; }
-      if (authRequired) { linkDevice(); return; }
-      rotationAction(joined() ? 'leave' : 'join');
+      linkDevice();
+    });
+    root.querySelectorAll('[data-self-action]').forEach(button => {
+      button.addEventListener('click', () => rotationAction(button.dataset.selfAction));
     });
     root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); setEnabled(false); stopPolling(); render(); });
   }
