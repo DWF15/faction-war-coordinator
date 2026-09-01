@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.14.2
+// @version      0.14.3
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -29,6 +29,7 @@
   const KEY_ENABLED = 'frt-enabled';
   const SETTINGS_KEY = 'frt-settings-v1';
   const ALERT_STAGE_KEY = 'frt-alert-stage-v1';
+  const ALERT_CLAIM_KEY = 'frt-alert-claim-v1';
   const TOKEN_KEY = 'fwc-device-token-v1';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const DEVICE_NAME_KEY = 'fwc-device-name-v1';
@@ -317,8 +318,57 @@
     if (current.stage === lastAlertStage) return;
     lastAlertStage = current.stage;
     rememberAlertStage(current.stage);
-    if (current.stage) showTransitionAlert(current.stage, current.detail);
+    if (current.stage && alertClaim(current.stage, current.detail)) showTransitionAlert(current.stage, current.detail);
     if (rerender && document.getElementById(ROOT_ID)) render();
+  }
+
+  function alertClaim(stage, detail = '') {
+    if (!stage) return true;
+    const signature = `${stage}|${String(detail || '').trim().toUpperCase()}`;
+    try {
+      const raw = sessionStorage.getItem(ALERT_CLAIM_KEY);
+      const previous = raw ? JSON.parse(raw) : null;
+      const now = Date.now();
+      // Multiple userscript instances can briefly overlap during Torn/PDA SPA
+      // navigation or viewport reinjection. Only the first instance may claim
+      // an unchanged semantic alert within this short guard window.
+      if (previous && previous.signature === signature && now - Number(previous.at || 0) < 30000) return false;
+      sessionStorage.setItem(ALERT_CLAIM_KEY, JSON.stringify({ signature, at: now }));
+    } catch (_) {}
+    return true;
+  }
+
+  function ordinal(value) {
+    const n = Math.max(1, Number(value) || 1);
+    const mod100 = n % 100;
+    const suffix = mod100 >= 11 && mod100 <= 13 ? 'TH' : ({1:'ST',2:'ND',3:'RD'}[n % 10] || 'TH');
+    return `${n}${suffix}`;
+  }
+
+  function compactStatus(member) {
+    if (!member) return '';
+    const readiness = readinessFor(member);
+    if (readiness) {
+      return readiness.label.replace(/^SKIP · /, '').replace(/^SKIPPED · /, '').replace(/^RETURN READY$/, 'READY');
+    }
+    const status = String(member.status || '').trim();
+    return status && !/^okay$|^ready$/i.test(status) ? status.toUpperCase() : '';
+  }
+
+  function compactMemberButton(member, kind) {
+    if (!member) return `<span class="frt-compact-person frt-compact-${kind} frt-compact-empty">—</span>`;
+    return `<button type="button" class="frt-compact-person frt-compact-${kind}" data-rotation-id="${esc(member.rotationUserId)}" title="${esc(member.name)}">${esc(member.name)}</button>`;
+  }
+
+  function compactViewerRow() {
+    const member = viewerRotationMember();
+    if (!member) return `<div class="frt-compact-me frt-compact-me-empty">YOU · NOT IN ROTATION</div>`;
+    const index = rotation.findIndex(candidate => candidate.rotationUserId === member.rotationUserId);
+    const place = index >= 0 ? index + 1 : (Number(member.position) || 1);
+    const status = compactStatus(member);
+    const skipped = viewerIsSkipped();
+    const state = [ordinal(place), skipped ? 'SKIPPED' : '', status].filter(Boolean).join(' · ');
+    return `<button type="button" class="frt-compact-me" data-rotation-id="${esc(member.rotationUserId)}"><span class="frt-compact-me-name">${esc(member.name)}</span><span class="frt-compact-you">YOU</span><span class="frt-compact-me-state">${esc(state)}</span></button>`;
   }
 
   function openSettings() {
@@ -401,9 +451,12 @@
   }
 
   function updateChainTimerDisplay() {
+    const value = formatChain(currentChainSeconds());
     const timer = document.querySelector(`#${ROOT_ID} .frt-timer strong`);
-    if (!timer) return;
-    timer.textContent = formatChain(currentChainSeconds());
+    if (timer) timer.textContent = value;
+    const compactTimer = document.querySelector(`#${ROOT_ID} .frt-compact-timer-value`);
+    if (compactTimer) compactTimer.textContent = value;
+    if (!timer && !compactTimer) return;
     evaluateAlertTransition({ rerender: true });
   }
 
@@ -1216,6 +1269,7 @@
       #${ROOT_ID}.frt-offline .frt-live { background:var(--danger); box-shadow:0 0 7px rgba(255,107,107,.65); }
       #${ROOT_ID} .frt-desktop, #${ROOT_ID} .frt-mobile { display:flex; min-width:0; align-items:stretch; }
       #${ROOT_ID} .frt-mobile { display:none; }
+      #${ROOT_ID} .frt-compact { display:none; }
       #${ROOT_ID} .frt-empty { flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:10px; padding:0 12px; }
       #${ROOT_ID} .frt-member { flex:1 1 0; min-width:112px; max-width:220px; border:0; border-right:1px solid var(--border); border-top:3px solid transparent; background:transparent; color:inherit; padding:3px 7px 4px; cursor:pointer; text-align:center; }
       #${ROOT_ID} .frt-member:hover, #${ROOT_ID} .frt-member:focus-visible { background:rgba(255,255,255,.055); outline:none; }
@@ -1333,29 +1387,39 @@
       #${ROTATION_EDITOR_ID} .frt-editor-cancel { background:#252a30; color:#f3f5f7; }
 
       @media (max-width:720px) {
-        #${ROOT_ID} .frt-bar { grid-template-columns:minmax(0,1fr) auto auto; min-height:42px; }
-        #${ROOT_ID} .frt-brand, #${ROOT_ID} .frt-desktop { display:none; }
-        #${ROOT_ID} .frt-mobile { display:flex; min-width:0; }
-        #${ROOT_ID} .frt-member { min-width:0; max-width:none; padding:2px 3px 3px; }
-        #${ROOT_ID} .frt-line1 { font-size:10px; line-height:14px; gap:2px; }
-        #${ROOT_ID} .frt-line2 { font-size:7px; line-height:10px; gap:2px; }
-        #${ROOT_ID} .frt-readiness { margin-top:1px; padding:0 3px; font-size:6px; line-height:9px; }
-        #${ROOT_ID} .frt-target-open { display:none; }
-        #${ROOT_ID} .frt-you { display:none; }
-        #${ROOT_ID} .frt-timer { min-width:64px; padding:2px 4px; }
-        #${ROOT_ID} .frt-timer strong { font-size:10px; line-height:13px; }
-        #${ROOT_ID} .frt-timer small, #${ROOT_ID} .frt-off { font-size:6px; }
-        #${ALERT_ID} { top:50px; min-height:48px; padding:8px 30px 8px 11px; }
-        #${ALERT_ID} strong { font-size:13px; }
-        #${ALERT_ID}.frt-alert-attack strong { font-size:16px; }
-        #${SETTINGS_ID} { padding:52px 7px 10px; }
+        #${ROOT_ID} .frt-bar { display:none; }
+        #${ROOT_ID} .frt-compact { display:grid; grid-template-rows:auto auto auto; width:100%; min-width:0; }
+        #${ROOT_ID} .frt-compact-top { display:grid; grid-template-columns:minmax(100px,1fr) auto auto auto; align-items:stretch; min-height:34px; border-bottom:1px solid var(--border); }
+        #${ROOT_ID} .frt-compact-brand { display:flex; align-items:center; gap:5px; min-width:0; padding:3px 7px; font-size:9px; font-weight:900; white-space:nowrap; }
+        #${ROOT_ID} .frt-compact-brand .frt-live { flex:0 0 7px; width:7px; height:7px; }
+        #${ROOT_ID} .frt-compact-timer-value { color:#f3f5f7; font-size:9px; font-variant-numeric:tabular-nums; }
+        #${ROOT_ID} .frt-compact-top button { min-width:0; height:34px; padding:0 8px; border:0; border-left:1px solid var(--border); border-radius:0; color:white; font-size:8px; font-weight:900; cursor:pointer; white-space:nowrap; }
+        #${ROOT_ID} .frt-compact-settings { background:#2a3036; }
+        #${ROOT_ID} .frt-compact-skip { background:#66551e; }
+        #${ROOT_ID} .frt-compact-return { background:#285f73; }
+        #${ROOT_ID} .frt-compact-leave { background:#653535; }
+        #${ROOT_ID} .frt-compact-join { background:#286d45; }
+        #${ROOT_ID} .frt-compact-top button:disabled { opacity:.55; }
+        #${ROOT_ID} .frt-compact-front { display:grid; grid-template-columns:1fr 1fr; min-height:29px; border-bottom:1px solid var(--border); }
+        #${ROOT_ID} .frt-compact-person { min-width:0; border:0; background:transparent; padding:4px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; font-size:10px; font-weight:900; cursor:pointer; }
+        #${ROOT_ID} .frt-compact-person + .frt-compact-person { border-left:1px solid var(--border); }
+        #${ROOT_ID} .frt-compact-up { color:var(--up); border-top:2px solid var(--up); }
+        #${ROOT_ID} .frt-compact-deck { color:var(--deck); border-top:2px solid var(--deck); }
+        #${ROOT_ID} .frt-compact-empty { color:#6f777e; cursor:default; }
+        #${ROOT_ID} .frt-compact-me { width:100%; min-width:0; min-height:30px; display:flex; align-items:center; justify-content:center; gap:5px; border:0; background:transparent; color:#f3f5f7; padding:4px 8px; cursor:pointer; white-space:nowrap; overflow:hidden; }
+        #${ROOT_ID} .frt-compact-me-name { min-width:0; max-width:40%; overflow:hidden; text-overflow:ellipsis; font-size:10px; font-weight:900; }
+        #${ROOT_ID} .frt-compact-you { flex:0 0 auto; padding:1px 3px; border:1px solid var(--me); border-radius:3px; color:var(--me); font-size:6px; font-weight:900; }
+        #${ROOT_ID} .frt-compact-me-state { min-width:0; overflow:hidden; text-overflow:ellipsis; color:#b9c0c7; font-size:8px; font-weight:800; }
+        #${ROOT_ID} .frt-compact-me-empty { color:#8f979f; cursor:default; }
+        #${ALERT_ID} { top:98px; min-height:46px; padding:7px 28px 7px 10px; }
+        #${ALERT_ID} strong { font-size:12px; }
+        #${ALERT_ID} span { font-size:9px; }
+        #${ALERT_ID}.frt-alert-attack strong { font-size:15px; }
+        #${SETTINGS_ID} { padding:104px 7px 10px; }
         #${SETTINGS_ID} .frt-volume-row { grid-template-columns:1fr 110px; }
         #${SETTINGS_ID} input[type="range"] { width:110px; }
-        #${ROOT_ID} .frt-actions { gap:4px; padding:3px 4px; }
-        #${ROOT_ID} .frt-settings-button { min-width:62px; width:62px; height:28px; padding:0 5px; font-size:7px; }
-        #${ROOT_ID} .frt-joinleave { min-width:44px; width:44px; height:28px; font-size:8px; padding:0; }
-        #${ROTATION_EDITOR_ID} { padding:54px 8px 12px; }
-        #${ROTATION_EDITOR_ID} .frt-editor-card { max-height:calc(100vh - 66px); padding:9px; }
+        #${ROTATION_EDITOR_ID} { padding:104px 8px 12px; }
+        #${ROTATION_EDITOR_ID} .frt-editor-card { max-height:calc(100vh - 116px); padding:9px; }
         #${ROTATION_EDITOR_ID} .frt-editor-row { grid-template-columns:22px minmax(0,1fr) auto; min-height:46px; padding:5px 4px; }
         #${ROTATION_EDITOR_ID} .frt-editor-move button { width:34px; height:34px; }
       }`;
@@ -1529,7 +1593,32 @@
       const skipped = viewerIsSkipped();
       actionHtml = `<div class="frt-self-actions"><button type="button" class="frt-joinleave ${skipped ? 'frt-return' : 'frt-skip'}" data-self-action="${skipped ? 'return' : 'skip'}" ${disabled}>${writePending ? 'WORKING…' : (skipped ? 'RETURN' : 'SKIP')}</button><button type="button" class="frt-joinleave frt-leave" data-self-action="leave" ${disabled}>LEAVE</button></div>`;
     }
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><div class="frt-timer-controls"><button type="button" class="frt-off">OFF</button></div></div><div class="frt-actions"><button type="button" class="frt-settings-button" title="Rotation settings" aria-label="Rotation settings">SETTINGS</button>${actionHtml}</div></div>`;
+    const upMember = rotation.find(member => member.role === 'up') || null;
+    const deckMember = rotation.find(member => member.role === 'on-deck') || null;
+    let compactPrimaryAction = '';
+    let compactSecondaryAction = '';
+    if (authRequired) {
+      compactSecondaryAction = (pdaDeviceProof || !authDiagnostic)
+        ? '<button type="button" class="frt-compact-join frt-link">LINK</button>'
+        : '<button type="button" class="frt-compact-join frt-diag">DIAG</button>';
+    } else if (!joined()) {
+      compactSecondaryAction = `<button type="button" class="frt-compact-join" data-self-action="join" ${disabled}>${writePending ? '…' : 'JOIN'}</button>`;
+    } else {
+      const skipped = viewerIsSkipped();
+      compactPrimaryAction = `<button type="button" class="${skipped ? 'frt-compact-return' : 'frt-compact-skip'}" data-self-action="${skipped ? 'return' : 'skip'}" ${disabled}>${writePending ? '…' : (skipped ? 'RETURN' : 'SKIP')}</button>`;
+      compactSecondaryAction = `<button type="button" class="frt-compact-leave" data-self-action="leave" ${disabled}>LEAVE</button>`;
+    }
+    const compactHtml = `<div class="frt-compact">
+      <div class="frt-compact-top">
+        <div class="frt-compact-brand" title="${esc(lastError)}"><span class="frt-live"></span><span>ROTATION</span><span>•</span><span class="frt-compact-timer-value">${esc(formatChain(currentChainSeconds()))}</span></div>
+        <button type="button" class="frt-compact-settings">SETTINGS</button>
+        ${compactPrimaryAction || '<span></span>'}
+        ${compactSecondaryAction || '<span></span>'}
+      </div>
+      <div class="frt-compact-front">${compactMemberButton(upMember, 'up')}${compactMemberButton(deckMember, 'deck')}</div>
+      ${compactViewerRow()}
+    </div>`;
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><div class="frt-timer-controls"><button type="button" class="frt-off">OFF</button></div></div><div class="frt-actions"><button type="button" class="frt-settings-button" title="Rotation settings" aria-label="Rotation settings">SETTINGS</button>${actionHtml}</div></div>${compactHtml}`;
     document.body.prepend(root);
 
     root.querySelectorAll('[data-readiness-action]').forEach(badge => badge.addEventListener('click', e => {
@@ -1543,20 +1632,20 @@
       const url = String(e.currentTarget.dataset.attackUrl || '');
       if (url) window.location.assign(url);
     }));
-    root.querySelectorAll('.frt-member').forEach(btn => btn.addEventListener('click', e => {
+    root.querySelectorAll('.frt-member, .frt-compact-person[data-rotation-id], .frt-compact-me[data-rotation-id]').forEach(btn => btn.addEventListener('click', e => {
       const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId));
       if (member) openOverlay(member, e.currentTarget);
     }));
-    const linkOrDiagButton = root.querySelector('.frt-link, .frt-diag');
-    if (linkOrDiagButton) linkOrDiagButton.addEventListener('click', () => {
+    root.querySelectorAll('.frt-link, .frt-diag').forEach(linkOrDiagButton => linkOrDiagButton.addEventListener('click', () => {
       if (authRequired && pdaDeviceProof) { linkDevice(); return; }
       if (authRequired && authDiagnostic) { alert(diagnosticDetails()); return; }
       linkDevice();
-    });
+    }));
     root.querySelectorAll('[data-self-action]').forEach(button => {
       button.addEventListener('click', () => rotationAction(button.dataset.selfAction));
     });
     root.querySelector('.frt-settings-button')?.addEventListener('click', openSettings);
+    root.querySelector('.frt-compact-settings')?.addEventListener('click', openSettings);
     root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); setEnabled(false); stopPolling(); render(); });
   }
 
