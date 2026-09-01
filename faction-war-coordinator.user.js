@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.13.3
+// @version      0.14.0
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -24,7 +24,10 @@
   const ROTATION_EDITOR_ID = 'frt-rotation-editor';
   const STYLE_ID = 'frt-style';
   const OFF_BUTTON_ID = 'frt-header-enable';
+  const SETTINGS_ID = 'frt-settings';
+  const ALERT_ID = 'frt-transition-alert';
   const KEY_ENABLED = 'frt-enabled';
+  const SETTINGS_KEY = 'frt-settings-v1';
   const TOKEN_KEY = 'fwc-device-token-v1';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const DEVICE_NAME_KEY = 'fwc-device-name-v1';
@@ -46,6 +49,7 @@
 
   let rotation = [];
   let chainSeconds = null;
+  let hitTimeSeconds = null;
   let chainDeadlineAt = null;
   let chainTickTimer = null;
   let maintenanceTimer = null;
@@ -61,9 +65,149 @@
   let authDiagnostic = null;
   let authDiagnosticAlerted = false;
   let pdaDeviceProof = '';
+  let alertBaselineInitialized = false;
+  let lastAlertStage = null;
+  let alertHideTimer = null;
 
   const enabled = () => localStorage.getItem(KEY_ENABLED) !== 'false';
   const setEnabled = v => localStorage.setItem(KEY_ENABLED, String(v));
+
+
+  const DEFAULT_SETTINGS = Object.freeze({
+    visualAlerts: true,
+    readinessAlerts: true,
+    getReadyAlert: true,
+    nextAlert: true,
+    upNowAlert: true,
+    attackNowAlert: true
+  });
+
+  function loadSettings() {
+    try {
+      const raw = scriptStorageGet(SETTINGS_KEY, '');
+      const parsed = raw ? JSON.parse(raw) : {};
+      return Object.assign({}, DEFAULT_SETTINGS, parsed && typeof parsed === 'object' ? parsed : {});
+    } catch (_) {
+      return Object.assign({}, DEFAULT_SETTINGS);
+    }
+  }
+
+  function saveSettings(settings) {
+    scriptStorageSet(SETTINGS_KEY, JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, settings || {})));
+  }
+
+  function closeSettings() { document.getElementById(SETTINGS_ID)?.remove(); }
+  function closeTransitionAlert() {
+    document.getElementById(ALERT_ID)?.remove();
+    if (alertHideTimer !== null) window.clearTimeout(alertHideTimer);
+    alertHideTimer = null;
+  }
+
+  function alertDefinition(stage, detail = '') {
+    const definitions = {
+      blocked: { title: 'NOT READY', detail: detail || 'Your current status prevents an attack.', kind: 'danger', duration: 6500 },
+      return_ready: { title: 'RETURN READY', detail: 'Your blocking condition has cleared. Return when you are ready.', kind: 'ready', duration: 6000 },
+      get_ready: { title: 'GET READY', detail: 'You are In the Hole. Prepare for your upcoming turn.', kind: 'ready', duration: 4500 },
+      next: { title: "YOU'RE NEXT", detail: 'You are On Deck. Be ready to take over the chain.', kind: 'next', duration: 5500 },
+      up_now: { title: 'UP NOW', detail: 'You own the current rotation turn. Watch the chain timer.', kind: 'up', duration: 7000 },
+      attack_now: { title: 'ATTACK NOW', detail: 'The configured hit window has arrived.', kind: 'attack', duration: 10000 }
+    };
+    return definitions[stage] || null;
+  }
+
+  function stageEnabled(stage, settings = loadSettings()) {
+    if (!settings.visualAlerts) return false;
+    if (stage === 'blocked' || stage === 'return_ready') return Boolean(settings.readinessAlerts);
+    if (stage === 'get_ready') return Boolean(settings.getReadyAlert);
+    if (stage === 'next') return Boolean(settings.nextAlert);
+    if (stage === 'up_now') return Boolean(settings.upNowAlert);
+    if (stage === 'attack_now') return Boolean(settings.attackNowAlert);
+    return false;
+  }
+
+  function showTransitionAlert(stage, detail = '', { preview = false } = {}) {
+    const settings = loadSettings();
+    if (!preview && !stageEnabled(stage, settings)) return;
+    const def = alertDefinition(stage, detail);
+    if (!def) return;
+    closeTransitionAlert();
+    const node = document.createElement('div');
+    node.id = ALERT_ID;
+    node.className = `frt-alert frt-alert-${def.kind}`;
+    node.setAttribute('role', 'status');
+    node.innerHTML = `<button type="button" class="frt-alert-close" aria-label="Dismiss">×</button><strong>${esc(def.title)}</strong><span>${esc(def.detail)}</span>`;
+    document.body.appendChild(node);
+    node.querySelector('.frt-alert-close')?.addEventListener('click', closeTransitionAlert);
+    alertHideTimer = window.setTimeout(closeTransitionAlert, def.duration);
+  }
+
+  function viewerOperationalStage() {
+    const member = viewerRotationMember();
+    if (!member) return { stage: null, detail: '' };
+    const blocker = attackBlockerFor(member);
+    const skipped = member.rotationStatus === 'skip' || member.rotationStatus === 'away';
+    if (skipped) {
+      if (!blocker) return { stage: 'return_ready', detail: '' };
+      return { stage: 'blocked', detail: blocker.label };
+    }
+    if (blocker) return { stage: 'blocked', detail: blocker.label };
+    if (member.role === 'in-hole') return { stage: 'get_ready', detail: '' };
+    if (member.role === 'on-deck') return { stage: 'next', detail: '' };
+    if (member.role === 'up') {
+      const current = currentChainSeconds();
+      const threshold = Number(hitTimeSeconds);
+      if (Number.isFinite(threshold) && threshold >= 0 && current !== null && current <= threshold) {
+        return { stage: 'attack_now', detail: '' };
+      }
+      return { stage: 'up_now', detail: '' };
+    }
+    return { stage: null, detail: '' };
+  }
+
+  function evaluateAlertTransition({ rerender = false } = {}) {
+    if (authRequired || !apiOnline) return;
+    const current = viewerOperationalStage();
+    if (!alertBaselineInitialized) {
+      alertBaselineInitialized = true;
+      lastAlertStage = current.stage;
+      return;
+    }
+    if (current.stage === lastAlertStage) return;
+    lastAlertStage = current.stage;
+    if (current.stage) showTransitionAlert(current.stage, current.detail);
+    if (rerender && document.getElementById(ROOT_ID)) render();
+  }
+
+  function openSettings() {
+    closeSettings();
+    const settings = loadSettings();
+    const modal = document.createElement('div');
+    modal.id = SETTINGS_ID;
+    modal.innerHTML = `<div class="frt-settings-card" role="dialog" aria-modal="true" aria-label="Faction War Coordinator settings">
+      <div class="frt-settings-head"><div><strong>ROTATION SETTINGS</strong><small>These preferences are stored on this device.</small></div><button type="button" class="frt-settings-close" aria-label="Close">×</button></div>
+      <div class="frt-settings-section"><strong>IN-PAGE ALERTS</strong>
+        <label><span>Enable visual alerts</span><input type="checkbox" data-setting="visualAlerts" ${settings.visualAlerts ? 'checked' : ''}></label>
+        <label><span>Readiness / unavailable alerts</span><input type="checkbox" data-setting="readinessAlerts" ${settings.readinessAlerts ? 'checked' : ''}></label>
+        <label><span>GET READY</span><input type="checkbox" data-setting="getReadyAlert" ${settings.getReadyAlert ? 'checked' : ''}></label>
+        <label><span>YOU'RE NEXT</span><input type="checkbox" data-setting="nextAlert" ${settings.nextAlert ? 'checked' : ''}></label>
+        <label><span>UP NOW</span><input type="checkbox" data-setting="upNowAlert" ${settings.upNowAlert ? 'checked' : ''}></label>
+        <label><span>ATTACK NOW</span><input type="checkbox" data-setting="attackNowAlert" ${settings.attackNowAlert ? 'checked' : ''}></label>
+      </div>
+      <div class="frt-settings-section"><strong>PREVIEW ALERTS</strong><div class="frt-preview-grid"><button data-preview="get_ready">GET READY</button><button data-preview="next">YOU'RE NEXT</button><button data-preview="up_now">UP NOW</button><button data-preview="attack_now">ATTACK NOW</button></div><small>Sound and device notifications come after these visual transitions are validated.</small></div>
+      <div class="frt-settings-actions"><button type="button" class="frt-settings-cancel">CANCEL</button><button type="button" class="frt-settings-save">SAVE</button></div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('.frt-settings-close')?.addEventListener('click', closeSettings);
+    modal.querySelector('.frt-settings-cancel')?.addEventListener('click', closeSettings);
+    modal.querySelector('.frt-settings-save')?.addEventListener('click', () => {
+      const next = Object.assign({}, settings);
+      modal.querySelectorAll('[data-setting]').forEach(input => { next[input.dataset.setting] = Boolean(input.checked); });
+      saveSettings(next);
+      closeSettings();
+    });
+    modal.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', () => showTransitionAlert(button.dataset.preview, '', { preview: true })));
+    modal.addEventListener('pointerdown', event => { if (event.target === modal) closeSettings(); });
+  }
 
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
@@ -96,6 +240,7 @@
     const timer = document.querySelector(`#${ROOT_ID} .frt-timer strong`);
     if (!timer) return;
     timer.textContent = formatChain(currentChainSeconds());
+    evaluateAlertTransition({ rerender: true });
   }
 
   function scheduleChainTick() {
@@ -218,7 +363,14 @@
     if (m.health !== null && Number(m.health) <= LOW_HEALTH_PERCENT) {
       return { label: 'LOW HEALTH', kind: 'warning', title: `Health is ${m.health}%. This is a warning only; you remain active.` };
     }
-    if (m.role === 'up') return { label: 'ATTACK NOW', kind: 'go', title: 'You are Up Now.' };
+    if (m.role === 'up') {
+      const current = currentChainSeconds();
+      const threshold = Number(hitTimeSeconds);
+      const attackWindow = Number.isFinite(threshold) && threshold >= 0 && current !== null && current <= threshold;
+      return attackWindow
+        ? { label: 'ATTACK NOW', kind: 'go', title: 'The configured hit window has arrived.' }
+        : { label: 'UP NOW', kind: 'go', title: 'You own the current turn. Watch the chain timer for the hit window.' };
+    }
     if (m.role === 'on-deck') return { label: "YOU'RE NEXT", kind: 'next', title: 'You are On Deck.' };
     if (m.role === 'in-hole') return { label: 'GET READY', kind: 'ready', title: 'You are In the Hole.' };
     return null;
@@ -281,6 +433,7 @@
       authRequired,
       apiOnline,
       lastError,
+      hitTimeSeconds,
       members: rotation.map(m => ({
         id: m.rotationUserId, tornId: m.tornId, name: m.name, eta: m.eta,
         target: m.target, targetId: m.targetId, attackUrl: m.attackUrl,
@@ -294,6 +447,8 @@
     const previousView = viewStateSignature();
     if (!data.ok || !Array.isArray(data.members)) throw new Error(data.error || 'Invalid Coordinator response');
     rotation = data.members.map(normalizeMember);
+    const reportedHitTime = Number(data.hit_time_seconds);
+    hitTimeSeconds = Number.isFinite(reportedHitTime) && reportedHitTime >= 0 ? reportedHitTime : null;
     chainSeconds = data.chain_seconds;
     if (chainSeconds === null || chainSeconds === undefined) {
       chainDeadlineAt = null;
@@ -339,6 +494,7 @@
       }
     }
 
+    evaluateAlertTransition();
     return previousView !== viewStateSignature();
   }
 
@@ -928,12 +1084,43 @@
       #${ROOT_ID} .frt-timer { min-width:98px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-left:1px solid var(--border); padding:2px 8px; }
       #${ROOT_ID} .frt-timer small { color:var(--muted); font-size:7px; font-weight:900; letter-spacing:.08em; }
       #${ROOT_ID} .frt-timer strong { font-size:14px; font-variant-numeric:tabular-nums; line-height:17px; }
-      #${ROOT_ID} .frt-off { border:0; background:transparent; color:var(--muted); font-size:7px; font-weight:800; cursor:pointer; padding:0; }
       #${ROOT_ID} .frt-actions { display:flex; align-items:center; padding:4px 9px; border-left:1px solid var(--border); }
       #${ROOT_ID} .frt-self-actions { display:flex; align-items:center; gap:5px; }
       #${ROOT_ID} .frt-joinleave { min-width:90px; height:30px; border-radius:5px; border:1px solid var(--border); color:white; font-size:10px; font-weight:900; cursor:pointer; }
       #${ROOT_ID} .frt-joinleave:disabled { opacity:.55; cursor:wait; }
       #${ROOT_ID} .frt-join { background:#286d45; } #${ROOT_ID} .frt-leave { background:#653535; } #${ROOT_ID} .frt-skip { background:#66551e; } #${ROOT_ID} .frt-return { background:#285f73; }
+      #${ROOT_ID} .frt-timer-controls { display:flex; align-items:center; justify-content:center; gap:5px; min-height:10px; }
+      #${ROOT_ID} .frt-settings-button, #${ROOT_ID} .frt-off { border:0; background:transparent; color:var(--muted); font-size:7px; font-weight:800; cursor:pointer; padding:0; }
+      #${ROOT_ID} .frt-settings-button:hover, #${ROOT_ID} .frt-off:hover { color:white; }
+      #${ALERT_ID} { position:fixed; z-index:1000014; top:58px; left:50%; transform:translateX(-50%); width:min(520px,calc(100vw - 18px)); min-height:52px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 12px; padding:9px 34px 9px 14px; border:1px solid #4b535c; border-radius:7px; background:#1a1e22; color:#f4f6f8; box-shadow:0 10px 30px rgba(0,0,0,.48); font-family:Arial,Helvetica,sans-serif; box-sizing:border-box; }
+      #${ALERT_ID} strong { grid-column:1; font-size:15px; letter-spacing:.04em; }
+      #${ALERT_ID} span { grid-column:1; font-size:10px; color:#c3c9cf; }
+      #${ALERT_ID} .frt-alert-close { position:absolute; top:5px; right:7px; border:0; background:transparent; color:#aab1b8; font-size:17px; cursor:pointer; }
+      #${ALERT_ID}.frt-alert-ready { border-left:5px solid #e8c94f; }
+      #${ALERT_ID}.frt-alert-next { border-left:5px solid #55aaff; }
+      #${ALERT_ID}.frt-alert-up { border-left:5px solid #49d17d; }
+      #${ALERT_ID}.frt-alert-attack { border:2px solid #ff6b6b; border-left-width:7px; box-shadow:0 10px 34px rgba(255,107,107,.2),0 10px 30px rgba(0,0,0,.5); }
+      #${ALERT_ID}.frt-alert-attack strong { color:#ff8a8a; font-size:18px; }
+      #${ALERT_ID}.frt-alert-danger { border-left:5px solid #ff6b6b; }
+      #${SETTINGS_ID} { position:fixed; inset:0; z-index:1000016; display:grid; place-items:start center; padding:70px 10px 18px; background:rgba(0,0,0,.58); font-family:Arial,Helvetica,sans-serif; box-sizing:border-box; }
+      #${SETTINGS_ID} * { box-sizing:border-box; }
+      #${SETTINGS_ID} .frt-settings-card { width:min(430px,100%); max-height:calc(100vh - 88px); overflow:auto; background:#191c20; color:#f3f5f7; border:1px solid #454b53; border-radius:9px; box-shadow:0 14px 42px rgba(0,0,0,.62); padding:12px; }
+      #${SETTINGS_ID} .frt-settings-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; padding-bottom:9px; border-bottom:1px solid #3a4047; }
+      #${SETTINGS_ID} .frt-settings-head strong { font-size:14px; }
+      #${SETTINGS_ID} .frt-settings-head small { display:block; margin-top:2px; color:#aab1b8; font-size:9px; }
+      #${SETTINGS_ID} .frt-settings-close { border:0; background:transparent; color:#aab1b8; font-size:20px; cursor:pointer; }
+      #${SETTINGS_ID} .frt-settings-section { margin-top:10px; padding:9px; border:1px solid #353b42; border-radius:6px; background:#20242a; }
+      #${SETTINGS_ID} .frt-settings-section > strong { display:block; margin-bottom:5px; color:#b9c0c7; font-size:9px; letter-spacing:.08em; }
+      #${SETTINGS_ID} .frt-settings-section > small { display:block; margin-top:7px; color:#8f979f; font-size:8px; line-height:1.35; }
+      #${SETTINGS_ID} label { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:31px; border-bottom:1px solid #30353b; font-size:11px; }
+      #${SETTINGS_ID} label:last-child { border-bottom:0; }
+      #${SETTINGS_ID} input[type="checkbox"] { width:18px; height:18px; accent-color:#49d17d; }
+      #${SETTINGS_ID} .frt-preview-grid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+      #${SETTINGS_ID} .frt-preview-grid button { min-height:30px; border:1px solid #454b53; border-radius:4px; background:#282d33; color:#f3f5f7; font-size:9px; font-weight:800; cursor:pointer; }
+      #${SETTINGS_ID} .frt-settings-actions { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:10px; }
+      #${SETTINGS_ID} .frt-settings-actions button { min-height:35px; border:1px solid #454b53; border-radius:5px; color:white; font-size:10px; font-weight:900; cursor:pointer; }
+      #${SETTINGS_ID} .frt-settings-cancel { background:#292e34; }
+      #${SETTINGS_ID} .frt-settings-save { background:#2e7d4c; }
       #${OFF_BUTTON_ID} { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; min-width:26px; margin-left:5px; padding:0; border:1px solid rgba(255,255,255,.12); border-radius:4px; background:rgba(12,15,18,.90); color:#e8edf1; cursor:pointer; box-sizing:border-box; vertical-align:middle; }
       #${OFF_BUTTON_ID} svg { width:20px; height:20px; display:block; } #${OFF_BUTTON_ID} .frt-chain { stroke:#cfd3d6; } #${OFF_BUTTON_ID} .frt-rotate { stroke:#55c95f; }
       #${OFF_BUTTON_ID}:hover { background:rgba(255,255,255,.08); border-color:rgba(85,201,95,.75); box-shadow:0 0 8px rgba(85,201,95,.28); }
@@ -987,7 +1174,11 @@
         #${ROOT_ID} .frt-you { display:none; }
         #${ROOT_ID} .frt-timer { min-width:64px; padding:2px 4px; }
         #${ROOT_ID} .frt-timer strong { font-size:10px; line-height:13px; }
-        #${ROOT_ID} .frt-timer small, #${ROOT_ID} .frt-off { font-size:6px; }
+        #${ROOT_ID} .frt-timer small, #${ROOT_ID} .frt-off, #${ROOT_ID} .frt-settings-button { font-size:6px; }
+        #${ALERT_ID} { top:50px; min-height:48px; padding:8px 30px 8px 11px; }
+        #${ALERT_ID} strong { font-size:13px; }
+        #${ALERT_ID}.frt-alert-attack strong { font-size:16px; }
+        #${SETTINGS_ID} { padding:52px 7px 10px; }
         #${ROOT_ID} .frt-actions { padding:3px 4px; }
         #${ROOT_ID} .frt-joinleave { min-width:44px; width:44px; height:28px; font-size:8px; padding:0; }
         #${ROTATION_EDITOR_ID} { padding:54px 8px 12px; }
@@ -1165,7 +1356,7 @@
       const skipped = viewerIsSkipped();
       actionHtml = `<div class="frt-self-actions"><button type="button" class="frt-joinleave ${skipped ? 'frt-return' : 'frt-skip'}" data-self-action="${skipped ? 'return' : 'skip'}" ${disabled}>${writePending ? 'WORKING…' : (skipped ? 'RETURN' : 'SKIP')}</button><button type="button" class="frt-joinleave frt-leave" data-self-action="leave" ${disabled}>LEAVE</button></div>`;
     }
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${actionHtml}</div></div>`;
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><div class="frt-timer-controls"><button type="button" class="frt-settings-button" title="Rotation settings" aria-label="Rotation settings">⚙</button><button type="button" class="frt-off">OFF</button></div></div><div class="frt-actions">${actionHtml}</div></div>`;
     document.body.prepend(root);
 
     root.querySelectorAll('[data-readiness-action]').forEach(badge => badge.addEventListener('click', e => {
@@ -1192,7 +1383,8 @@
     root.querySelectorAll('[data-self-action]').forEach(button => {
       button.addEventListener('click', () => rotationAction(button.dataset.selfAction));
     });
-    root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); setEnabled(false); stopPolling(); render(); });
+    root.querySelector('.frt-settings-button')?.addEventListener('click', openSettings);
+    root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); setEnabled(false); stopPolling(); render(); });
   }
 
   function startPolling() {
