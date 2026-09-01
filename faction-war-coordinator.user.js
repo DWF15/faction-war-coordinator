@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.12.10
+// @version      0.13.0
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -41,6 +41,8 @@
   const OFFLINE_GRACE_MS = 15000;
   const FAILURES_BEFORE_OFFLINE = 3;
   const CACHE_MAX_AGE_MS = 60000;
+  const ATTACK_ENERGY_COST = 25;
+  const LOW_HEALTH_PERCENT = 25;
 
   let rotation = [];
   let chainSeconds = null;
@@ -164,15 +166,46 @@
     return members;
   }
 
+  function readinessFor(m) {
+    const me = viewerTornId !== null && m.tornId === viewerTornId;
+    if (!me) return null;
+
+    const status = String(m.status || '').trim();
+    const statusIsReady = !status || /^okay$/i.test(status) || /^ready$/i.test(status);
+    if (m.rotationStatus === 'skip' || m.rotationStatus === 'away') {
+      return { label: 'SKIPPED', kind: 'paused', title: 'You are currently skipped in the rotation.' };
+    }
+    if (!statusIsReady) {
+      return { label: status.toUpperCase(), kind: 'danger', title: `Current status: ${status}` };
+    }
+    if (m.energy !== null && Number(m.energy) < ATTACK_ENERGY_COST) {
+      return { label: 'LOW ENERGY', kind: 'danger', title: `${m.energy} energy available; a normal attack costs ${ATTACK_ENERGY_COST}.` };
+    }
+    if (m.health !== null && Number(m.health) <= LOW_HEALTH_PERCENT) {
+      return { label: 'LOW HEALTH', kind: 'warning', title: `Health is ${m.health}%.` };
+    }
+    if (m.role === 'up') return { label: 'ATTACK NOW', kind: 'go', title: 'You are Up Now.' };
+    if (m.role === 'on-deck') return { label: "YOU'RE NEXT", kind: 'next', title: 'You are On Deck.' };
+    if (m.role === 'in-hole') return { label: 'GET READY', kind: 'ready', title: 'You are In the Hole.' };
+    return null;
+  }
+
+  function targetHTML(m, target) {
+    if (!m.attackUrl) return `<span>${esc(target)}</span>`;
+    return `<span class="frt-target-hit" data-attack-url="${esc(m.attackUrl)}" title="Attack ${esc(target)}">${esc(target)} <span class="frt-target-open">↗</span></span>`;
+  }
+
   function memberHTML(m) {
     const me = viewerTornId !== null && m.tornId === viewerTornId;
     const warning = m.status && !/^okay$/i.test(m.status) && !/^ready$/i.test(m.status);
     const target = m.target || '—';
+    const targetMarkup = targetHTML(m, target);
+    const readiness = readinessFor(m);
     const secondary = m.role === 'normal'
-      ? `<span class="frt-arrow">→</span><span>${esc(target)}</span>`
-      : `<b>${esc(roleLabel(m))}</b><span> • ${esc(target)}</span>`;
+      ? `<span class="frt-arrow">→</span>${targetMarkup}`
+      : `<b>${esc(roleLabel(m))}</b><span> • </span>${targetMarkup}`;
 
-    return `<button type="button" class="frt-member frt-${m.role} ${me ? 'frt-me' : ''}" data-rotation-id="${m.rotationUserId}">
+    return `<button type="button" class="frt-member frt-${m.role} ${me ? 'frt-me' : ''} ${readiness ? `frt-readiness-${readiness.kind}` : ''}" data-rotation-id="${m.rotationUserId}">
       <span class="frt-line1">
         <span class="frt-name">${esc(m.name)}</span>
         ${me ? '<span class="frt-you">YOU</span>' : ''}
@@ -181,6 +214,7 @@
         ${warning ? '<span class="frt-warn">!</span>' : ''}
       </span>
       <span class="frt-line2">${secondary}</span>
+      ${readiness ? `<span class="frt-readiness" title="${esc(readiness.title)}">${esc(readiness.label)}</span>` : ''}
     </button>`;
   }
 
@@ -799,6 +833,17 @@
       #${ROOT_ID} .frt-line1 { font-size:13px; font-weight:800; line-height:16px; }
       #${ROOT_ID} .frt-line2 { font-size:9px; line-height:12px; color:var(--muted); overflow:hidden; }
       #${ROOT_ID} .frt-line2 span { overflow:hidden; text-overflow:ellipsis; }
+      #${ROOT_ID} .frt-target-hit { color:#e8edf1; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:2px; cursor:pointer; font-weight:800; }
+      #${ROOT_ID} .frt-target-hit:hover { color:white; text-decoration-style:solid; }
+      #${ROOT_ID} .frt-target-open { color:var(--deck); font-size:.9em; text-decoration:none; }
+      #${ROOT_ID} .frt-readiness { display:inline-flex; align-items:center; justify-content:center; margin-top:2px; padding:1px 5px; border-radius:3px; font-size:7px; line-height:10px; font-weight:900; letter-spacing:.05em; white-space:nowrap; }
+      #${ROOT_ID} .frt-readiness-danger .frt-readiness { background:rgba(255,107,107,.18); color:#ff8b8b; border:1px solid rgba(255,107,107,.52); }
+      #${ROOT_ID} .frt-readiness-warning .frt-readiness { background:rgba(232,201,79,.15); color:#f0d866; border:1px solid rgba(232,201,79,.45); }
+      #${ROOT_ID} .frt-readiness-paused .frt-readiness { background:rgba(170,177,184,.13); color:#c8cdd2; border:1px solid rgba(170,177,184,.38); }
+      #${ROOT_ID} .frt-readiness-ready .frt-readiness { background:rgba(232,201,79,.14); color:var(--hole); border:1px solid rgba(232,201,79,.4); }
+      #${ROOT_ID} .frt-readiness-next .frt-readiness { background:rgba(85,170,255,.14); color:var(--deck); border:1px solid rgba(85,170,255,.42); }
+      #${ROOT_ID} .frt-readiness-go { box-shadow:inset 0 0 0 1px rgba(73,209,125,.28); }
+      #${ROOT_ID} .frt-readiness-go .frt-readiness { background:rgba(73,209,125,.18); color:#72e39b; border:1px solid rgba(73,209,125,.58); }
       #${ROOT_ID} .frt-arrow { color:var(--muted); font-weight:900; }
       #${ROOT_ID} .frt-name { overflow:hidden; text-overflow:ellipsis; }
       #${ROOT_ID} .frt-eta { font-variant-numeric:tabular-nums; }
@@ -865,6 +910,8 @@
         #${ROOT_ID} .frt-member { min-width:0; max-width:none; padding:2px 3px 3px; }
         #${ROOT_ID} .frt-line1 { font-size:10px; line-height:14px; gap:2px; }
         #${ROOT_ID} .frt-line2 { font-size:7px; line-height:10px; gap:2px; }
+        #${ROOT_ID} .frt-readiness { margin-top:1px; padding:0 3px; font-size:6px; line-height:9px; }
+        #${ROOT_ID} .frt-target-open { display:none; }
         #${ROOT_ID} .frt-you { display:none; }
         #${ROOT_ID} .frt-timer { min-width:64px; padding:2px 4px; }
         #${ROOT_ID} .frt-timer strong { font-size:10px; line-height:13px; }
@@ -1041,6 +1088,12 @@
     root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><button type="button" class="frt-off">OFF</button></div><div class="frt-actions">${actionHtml}</div></div>`;
     document.body.prepend(root);
 
+    root.querySelectorAll('.frt-target-hit').forEach(target => target.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const url = String(e.currentTarget.dataset.attackUrl || '');
+      if (url) window.location.assign(url);
+    }));
     root.querySelectorAll('.frt-member').forEach(btn => btn.addEventListener('click', e => {
       const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId));
       if (member) openOverlay(member, e.currentTarget);
