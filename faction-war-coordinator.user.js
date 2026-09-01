@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.14.0
+// @version      0.14.2
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -28,6 +28,7 @@
   const ALERT_ID = 'frt-transition-alert';
   const KEY_ENABLED = 'frt-enabled';
   const SETTINGS_KEY = 'frt-settings-v1';
+  const ALERT_STAGE_KEY = 'frt-alert-stage-v1';
   const TOKEN_KEY = 'fwc-device-token-v1';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const DEVICE_NAME_KEY = 'fwc-device-name-v1';
@@ -68,6 +69,8 @@
   let alertBaselineInitialized = false;
   let lastAlertStage = null;
   let alertHideTimer = null;
+  let audioContext = null;
+  let audioRunId = 0;
 
   const enabled = () => localStorage.getItem(KEY_ENABLED) !== 'false';
   const setEnabled = v => localStorage.setItem(KEY_ENABLED, String(v));
@@ -79,7 +82,14 @@
     getReadyAlert: true,
     nextAlert: true,
     upNowAlert: true,
-    attackNowAlert: true
+    attackNowAlert: true,
+    audioAlerts: false,
+    audioReadiness: true,
+    audioGetReady: true,
+    audioNext: true,
+    audioUpNow: true,
+    audioAttackNow: true,
+    audioVolume: 60
   });
 
   function loadSettings() {
@@ -125,11 +135,125 @@
     return false;
   }
 
-  function showTransitionAlert(stage, detail = '', { preview = false } = {}) {
+  function audioStageEnabled(stage, settings = loadSettings()) {
+    if (!settings.audioAlerts) return false;
+    if (stage === 'blocked' || stage === 'return_ready') return Boolean(settings.audioReadiness);
+    if (stage === 'get_ready') return Boolean(settings.audioGetReady);
+    if (stage === 'next') return Boolean(settings.audioNext);
+    if (stage === 'up_now') return Boolean(settings.audioUpNow);
+    if (stage === 'attack_now') return Boolean(settings.audioAttackNow);
+    return false;
+  }
+
+  function audioPattern(stage) {
+    const patterns = {
+      blocked: [
+        { at: 0, frequency: 300, duration: 150, gain: 0.55 },
+        { at: 230, frequency: 260, duration: 220, gain: 0.62 }
+      ],
+      return_ready: [
+        { at: 0, frequency: 480, duration: 130, gain: 0.42 },
+        { at: 145, frequency: 620, duration: 180, gain: 0.48 }
+      ],
+      get_ready: [
+        { at: 0, frequency: 440, duration: 120, gain: 0.38 },
+        { at: 160, frequency: 540, duration: 150, gain: 0.42 }
+      ],
+      next: [
+        { at: 0, frequency: 610, duration: 130, gain: 0.48 },
+        { at: 190, frequency: 610, duration: 130, gain: 0.48 }
+      ],
+      up_now: [
+        { at: 0, frequency: 720, duration: 130, gain: 0.52 },
+        { at: 170, frequency: 820, duration: 130, gain: 0.56 },
+        { at: 340, frequency: 920, duration: 180, gain: 0.60 }
+      ],
+      attack_now: [
+        { at: 0, frequency: 900, duration: 150, gain: 0.72 },
+        { at: 190, frequency: 1100, duration: 150, gain: 0.76 },
+        { at: 380, frequency: 900, duration: 150, gain: 0.72 },
+        { at: 570, frequency: 1100, duration: 220, gain: 0.80 },
+        { at: 1050, frequency: 900, duration: 150, gain: 0.72 },
+        { at: 1240, frequency: 1100, duration: 220, gain: 0.80 }
+      ]
+    };
+    return patterns[stage] || [];
+  }
+
+  function ensureAudioContext() {
+    if (audioContext && audioContext.state !== 'closed') return audioContext;
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return null;
+    try { audioContext = new AudioCtor(); } catch (_) { audioContext = null; }
+    return audioContext;
+  }
+
+  async function primeAudio() {
+    const context = ensureAudioContext();
+    if (!context) return false;
+    try {
+      if (context.state === 'suspended') await context.resume();
+      return context.state === 'running';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function scheduleTone(context, masterGain, step, baseTime) {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const startAt = baseTime + Math.max(0, Number(step.at) || 0) / 1000;
+    const duration = Math.max(0.04, (Number(step.duration) || 120) / 1000);
+    const peak = Math.max(0.0001, Math.min(1, Number(step.gain) || 0.5));
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(Math.max(80, Number(step.frequency) || 440), startAt);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(peak, startAt + Math.min(0.025, duration / 4));
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+    oscillator.connect(gain);
+    gain.connect(masterGain);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + duration + 0.02);
+  }
+
+  async function playStageAudio(stage, { preview = false } = {}) {
     const settings = loadSettings();
-    if (!preview && !stageEnabled(stage, settings)) return;
+    if (!preview && !audioStageEnabled(stage, settings)) return false;
+    const pattern = audioPattern(stage);
+    if (!pattern.length) return false;
+    const context = ensureAudioContext();
+    if (!context) return false;
+    try {
+      if (context.state === 'suspended') await context.resume();
+      if (context.state !== 'running') return false;
+      const runId = ++audioRunId;
+      const master = context.createGain();
+      const volume = Math.max(0, Math.min(100, Number(settings.audioVolume) || 0)) / 100;
+      master.gain.setValueAtTime(Math.max(0.0001, volume), context.currentTime);
+      master.connect(context.destination);
+      const baseTime = context.currentTime + 0.015;
+      pattern.forEach(step => scheduleTone(context, master, step, baseTime));
+      const endMs = Math.max(...pattern.map(step => (Number(step.at) || 0) + (Number(step.duration) || 120))) + 100;
+      window.setTimeout(() => {
+        if (runId <= audioRunId) {
+          try { master.disconnect(); } catch (_) {}
+        }
+      }, endMs);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function showTransitionAlert(stage, detail = '', { preview = false, audio = true } = {}) {
+    const settings = loadSettings();
+    const visualAllowed = preview || stageEnabled(stage, settings);
+    const audioAllowed = audio && (preview || audioStageEnabled(stage, settings));
+    if (!visualAllowed && !audioAllowed) return;
     const def = alertDefinition(stage, detail);
     if (!def) return;
+    if (audioAllowed) void playStageAudio(stage, { preview });
+    if (!visualAllowed) return;
     closeTransitionAlert();
     const node = document.createElement('div');
     node.id = ALERT_ID;
@@ -164,16 +288,35 @@
     return { stage: null, detail: '' };
   }
 
+  function storedAlertStage() {
+    try {
+      const value = sessionStorage.getItem(ALERT_STAGE_KEY);
+      return value === null ? undefined : (value || null);
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function rememberAlertStage(stage) {
+    try { sessionStorage.setItem(ALERT_STAGE_KEY, stage || ''); } catch (_) {}
+  }
+
   function evaluateAlertTransition({ rerender = false } = {}) {
     if (authRequired || !apiOnline) return;
     const current = viewerOperationalStage();
     if (!alertBaselineInitialized) {
       alertBaselineInitialized = true;
-      lastAlertStage = current.stage;
+      const stored = storedAlertStage();
+      lastAlertStage = stored === undefined ? current.stage : stored;
+      rememberAlertStage(current.stage);
+      // A page/layout reinjection must never turn an unchanged status into a
+      // fresh alert. Only a real Coordinator state transition after baseline
+      // initialization is allowed to notify the user.
       return;
     }
     if (current.stage === lastAlertStage) return;
     lastAlertStage = current.stage;
+    rememberAlertStage(current.stage);
     if (current.stage) showTransitionAlert(current.stage, current.detail);
     if (rerender && document.getElementById(ROOT_ID)) render();
   }
@@ -193,7 +336,17 @@
         <label><span>UP NOW</span><input type="checkbox" data-setting="upNowAlert" ${settings.upNowAlert ? 'checked' : ''}></label>
         <label><span>ATTACK NOW</span><input type="checkbox" data-setting="attackNowAlert" ${settings.attackNowAlert ? 'checked' : ''}></label>
       </div>
-      <div class="frt-settings-section"><strong>PREVIEW ALERTS</strong><div class="frt-preview-grid"><button data-preview="get_ready">GET READY</button><button data-preview="next">YOU'RE NEXT</button><button data-preview="up_now">UP NOW</button><button data-preview="attack_now">ATTACK NOW</button></div><small>Sound and device notifications come after these visual transitions are validated.</small></div>
+      <div class="frt-settings-section"><strong>AUDIO ALERTS</strong>
+        <label><span>Enable audio alerts</span><input type="checkbox" data-setting="audioAlerts" ${settings.audioAlerts ? 'checked' : ''}></label>
+        <label><span>Readiness / unavailable sound</span><input type="checkbox" data-setting="audioReadiness" ${settings.audioReadiness ? 'checked' : ''}></label>
+        <label><span>GET READY sound</span><input type="checkbox" data-setting="audioGetReady" ${settings.audioGetReady ? 'checked' : ''}></label>
+        <label><span>YOU'RE NEXT sound</span><input type="checkbox" data-setting="audioNext" ${settings.audioNext ? 'checked' : ''}></label>
+        <label><span>UP NOW sound</span><input type="checkbox" data-setting="audioUpNow" ${settings.audioUpNow ? 'checked' : ''}></label>
+        <label><span>ATTACK NOW sound</span><input type="checkbox" data-setting="audioAttackNow" ${settings.audioAttackNow ? 'checked' : ''}></label>
+        <label class="frt-volume-row"><span>Audio volume <b class="frt-volume-value">${Math.max(0, Math.min(100, Number(settings.audioVolume) || 0))}%</b></span><input type="range" min="0" max="100" step="5" data-setting="audioVolume" value="${Math.max(0, Math.min(100, Number(settings.audioVolume) || 0))}"></label>
+        <small>Audio is off by default. Use the test buttons below once on each device to verify that browser/PDA audio is permitted.</small><small class="frt-audio-status">Audio test status: not tested on this page.</small>
+      </div>
+      <div class="frt-settings-section"><strong>PREVIEW / TEST ALERTS</strong><div class="frt-preview-grid"><button data-preview="get_ready">GET READY</button><button data-preview="next">YOU'RE NEXT</button><button data-preview="up_now">UP NOW</button><button data-preview="attack_now">ATTACK NOW</button><button data-preview="blocked">NOT READY</button><button data-preview="return_ready">RETURN READY</button></div><small>Preview buttons show the visual alert and play that stage's sound even if audio alerts are currently disabled.</small></div>
       <div class="frt-settings-actions"><button type="button" class="frt-settings-cancel">CANCEL</button><button type="button" class="frt-settings-save">SAVE</button></div>
     </div>`;
     document.body.appendChild(modal);
@@ -201,11 +354,22 @@
     modal.querySelector('.frt-settings-cancel')?.addEventListener('click', closeSettings);
     modal.querySelector('.frt-settings-save')?.addEventListener('click', () => {
       const next = Object.assign({}, settings);
-      modal.querySelectorAll('[data-setting]').forEach(input => { next[input.dataset.setting] = Boolean(input.checked); });
+      modal.querySelectorAll('[data-setting]').forEach(input => {
+        next[input.dataset.setting] = input.type === 'range' ? Number(input.value) : Boolean(input.checked);
+      });
       saveSettings(next);
+      if (next.audioAlerts) void primeAudio();
       closeSettings();
     });
-    modal.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', () => showTransitionAlert(button.dataset.preview, '', { preview: true })));
+    const volumeInput = modal.querySelector('input[type="range"][data-setting="audioVolume"]');
+    const volumeValue = modal.querySelector('.frt-volume-value');
+    volumeInput?.addEventListener('input', () => { if (volumeValue) volumeValue.textContent = `${volumeInput.value}%`; });
+    const audioStatus = modal.querySelector('.frt-audio-status');
+    modal.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', async () => {
+      const audioReady = await primeAudio();
+      if (audioStatus) audioStatus.textContent = audioReady ? 'Audio test status: ready.' : 'Audio test status: blocked or unavailable on this page/device.';
+      showTransitionAlert(button.dataset.preview, '', { preview: true, audio: true });
+    }));
     modal.addEventListener('pointerdown', event => { if (event.target === modal) closeSettings(); });
   }
 
@@ -1084,14 +1248,17 @@
       #${ROOT_ID} .frt-timer { min-width:98px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-left:1px solid var(--border); padding:2px 8px; }
       #${ROOT_ID} .frt-timer small { color:var(--muted); font-size:7px; font-weight:900; letter-spacing:.08em; }
       #${ROOT_ID} .frt-timer strong { font-size:14px; font-variant-numeric:tabular-nums; line-height:17px; }
-      #${ROOT_ID} .frt-actions { display:flex; align-items:center; padding:4px 9px; border-left:1px solid var(--border); }
+      #${ROOT_ID} .frt-actions { display:flex; align-items:center; gap:6px; padding:4px 9px; border-left:1px solid var(--border); }
       #${ROOT_ID} .frt-self-actions { display:flex; align-items:center; gap:5px; }
       #${ROOT_ID} .frt-joinleave { min-width:90px; height:30px; border-radius:5px; border:1px solid var(--border); color:white; font-size:10px; font-weight:900; cursor:pointer; }
       #${ROOT_ID} .frt-joinleave:disabled { opacity:.55; cursor:wait; }
       #${ROOT_ID} .frt-join { background:#286d45; } #${ROOT_ID} .frt-leave { background:#653535; } #${ROOT_ID} .frt-skip { background:#66551e; } #${ROOT_ID} .frt-return { background:#285f73; }
       #${ROOT_ID} .frt-timer-controls { display:flex; align-items:center; justify-content:center; gap:5px; min-height:10px; }
-      #${ROOT_ID} .frt-settings-button, #${ROOT_ID} .frt-off { border:0; background:transparent; color:var(--muted); font-size:7px; font-weight:800; cursor:pointer; padding:0; }
-      #${ROOT_ID} .frt-settings-button:hover, #${ROOT_ID} .frt-off:hover { color:white; }
+      #${ROOT_ID} .frt-off { border:0; background:transparent; color:var(--muted); font-size:7px; font-weight:800; cursor:pointer; padding:0; }
+      #${ROOT_ID} .frt-off:hover { color:white; }
+      #${ROOT_ID} .frt-settings-button { min-width:82px; height:30px; padding:0 9px; border:1px solid #4a5159; border-radius:5px; background:#2a3036; color:#edf1f4; font-size:9px; font-weight:900; letter-spacing:.02em; cursor:pointer; white-space:nowrap; }
+      #${ROOT_ID} .frt-settings-button:hover { background:#353c43; border-color:#69737d; color:white; }
+      #${ROOT_ID} .frt-settings-button:focus-visible { outline:1px solid var(--deck); outline-offset:2px; }
       #${ALERT_ID} { position:fixed; z-index:1000014; top:58px; left:50%; transform:translateX(-50%); width:min(520px,calc(100vw - 18px)); min-height:52px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 12px; padding:9px 34px 9px 14px; border:1px solid #4b535c; border-radius:7px; background:#1a1e22; color:#f4f6f8; box-shadow:0 10px 30px rgba(0,0,0,.48); font-family:Arial,Helvetica,sans-serif; box-sizing:border-box; }
       #${ALERT_ID} strong { grid-column:1; font-size:15px; letter-spacing:.04em; }
       #${ALERT_ID} span { grid-column:1; font-size:10px; color:#c3c9cf; }
@@ -1115,6 +1282,9 @@
       #${SETTINGS_ID} label { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:31px; border-bottom:1px solid #30353b; font-size:11px; }
       #${SETTINGS_ID} label:last-child { border-bottom:0; }
       #${SETTINGS_ID} input[type="checkbox"] { width:18px; height:18px; accent-color:#49d17d; }
+      #${SETTINGS_ID} .frt-volume-row { display:grid; grid-template-columns:1fr 145px; }
+      #${SETTINGS_ID} .frt-volume-row b { color:#f3f5f7; font-variant-numeric:tabular-nums; }
+      #${SETTINGS_ID} input[type="range"] { width:145px; accent-color:#49d17d; }
       #${SETTINGS_ID} .frt-preview-grid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
       #${SETTINGS_ID} .frt-preview-grid button { min-height:30px; border:1px solid #454b53; border-radius:4px; background:#282d33; color:#f3f5f7; font-size:9px; font-weight:800; cursor:pointer; }
       #${SETTINGS_ID} .frt-settings-actions { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:10px; }
@@ -1174,12 +1344,15 @@
         #${ROOT_ID} .frt-you { display:none; }
         #${ROOT_ID} .frt-timer { min-width:64px; padding:2px 4px; }
         #${ROOT_ID} .frt-timer strong { font-size:10px; line-height:13px; }
-        #${ROOT_ID} .frt-timer small, #${ROOT_ID} .frt-off, #${ROOT_ID} .frt-settings-button { font-size:6px; }
+        #${ROOT_ID} .frt-timer small, #${ROOT_ID} .frt-off { font-size:6px; }
         #${ALERT_ID} { top:50px; min-height:48px; padding:8px 30px 8px 11px; }
         #${ALERT_ID} strong { font-size:13px; }
         #${ALERT_ID}.frt-alert-attack strong { font-size:16px; }
         #${SETTINGS_ID} { padding:52px 7px 10px; }
-        #${ROOT_ID} .frt-actions { padding:3px 4px; }
+        #${SETTINGS_ID} .frt-volume-row { grid-template-columns:1fr 110px; }
+        #${SETTINGS_ID} input[type="range"] { width:110px; }
+        #${ROOT_ID} .frt-actions { gap:4px; padding:3px 4px; }
+        #${ROOT_ID} .frt-settings-button { min-width:62px; width:62px; height:28px; padding:0 5px; font-size:7px; }
         #${ROOT_ID} .frt-joinleave { min-width:44px; width:44px; height:28px; font-size:8px; padding:0; }
         #${ROTATION_EDITOR_ID} { padding:54px 8px 12px; }
         #${ROTATION_EDITOR_ID} .frt-editor-card { max-height:calc(100vh - 66px); padding:9px; }
@@ -1356,7 +1529,7 @@
       const skipped = viewerIsSkipped();
       actionHtml = `<div class="frt-self-actions"><button type="button" class="frt-joinleave ${skipped ? 'frt-return' : 'frt-skip'}" data-self-action="${skipped ? 'return' : 'skip'}" ${disabled}>${writePending ? 'WORKING…' : (skipped ? 'RETURN' : 'SKIP')}</button><button type="button" class="frt-joinleave frt-leave" data-self-action="leave" ${disabled}>LEAVE</button></div>`;
     }
-    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><div class="frt-timer-controls"><button type="button" class="frt-settings-button" title="Rotation settings" aria-label="Rotation settings">⚙</button><button type="button" class="frt-off">OFF</button></div></div><div class="frt-actions">${actionHtml}</div></div>`;
+    root.innerHTML = `<div class="frt-bar"><div class="frt-brand" title="${esc(lastError)}"><span class="frt-live"></span>ROTATION</div><div class="frt-desktop">${desktop}</div><div class="frt-mobile">${mobile}</div><div class="frt-timer"><small>CHAIN TIMER</small><strong>${esc(formatChain(currentChainSeconds()))}</strong><div class="frt-timer-controls"><button type="button" class="frt-off">OFF</button></div></div><div class="frt-actions"><button type="button" class="frt-settings-button" title="Rotation settings" aria-label="Rotation settings">SETTINGS</button>${actionHtml}</div></div>`;
     document.body.prepend(root);
 
     root.querySelectorAll('[data-readiness-action]').forEach(badge => badge.addEventListener('click', e => {
