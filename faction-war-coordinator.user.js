@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.15.0
+// @version      0.15.1
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_notification
 // @connect      dwf-laptop.tail731dbb.ts.net
 // @run-at       document-idle
 // ==/UserScript==
@@ -93,7 +94,14 @@
     audioAttackNow: true,
     audioVolume: 60,
     attackRepeatEnabled: false,
-    attackRepeatDelaySeconds: 15
+    attackRepeatDelaySeconds: 15,
+    systemNotifications: false,
+    notifyOnlyWhenHidden: true,
+    notifyReadiness: true,
+    notifyGetReady: true,
+    notifyNext: true,
+    notifyUpNow: true,
+    notifyAttackNow: true
   });
 
   function loadSettings() {
@@ -249,14 +257,78 @@
     }
   }
 
-  function showTransitionAlert(stage, detail = '', { preview = false, audio = true } = {}) {
+  function notificationStageEnabled(stage, settings = loadSettings()) {
+    if (!settings.systemNotifications) return false;
+    if (settings.notifyOnlyWhenHidden && document.visibilityState === 'visible') return false;
+    if (stage === 'blocked' || stage === 'return_ready') return Boolean(settings.notifyReadiness);
+    if (stage === 'get_ready') return Boolean(settings.notifyGetReady);
+    if (stage === 'next') return Boolean(settings.notifyNext);
+    if (stage === 'up_now') return Boolean(settings.notifyUpNow);
+    if (stage === 'attack_now') return Boolean(settings.notifyAttackNow);
+    return false;
+  }
+
+  function notificationCapability() {
+    if (typeof GM_notification === 'function') return 'gm';
+    if (typeof Notification !== 'undefined') return 'native';
+    return 'none';
+  }
+
+  function notificationPermissionLabel() {
+    const capability = notificationCapability();
+    if (capability === 'gm') return 'available';
+    if (capability === 'none') return 'unavailable';
+    return Notification.permission || 'default';
+  }
+
+  async function requestSystemNotificationPermission() {
+    const capability = notificationCapability();
+    if (capability === 'gm') return true;
+    if (capability !== 'native') return false;
+    try {
+      if (Notification.permission === 'granted') return true;
+      const result = await Notification.requestPermission();
+      return result === 'granted';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function sendSystemNotification(stage, detail = '', { preview = false } = {}) {
+    const settings = loadSettings();
+    if (!preview && !notificationStageEnabled(stage, settings)) return false;
+    const def = alertDefinition(stage, detail);
+    if (!def) return false;
+    const title = `Faction War Coordinator — ${def.title}`;
+    const body = def.detail;
+    const focusTorn = () => {
+      try { window.focus(); } catch (_) {}
+    };
+    try {
+      if (typeof GM_notification === 'function') {
+        GM_notification({ title, text: body, timeout: Math.max(4000, def.duration), onclick: focusTorn });
+        return true;
+      }
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const notice = new Notification(title, { body, tag: `frt-${stage}`, renotify: stage === 'attack_now' });
+        notice.onclick = () => { focusTorn(); try { notice.close(); } catch (_) {} };
+        window.setTimeout(() => { try { notice.close(); } catch (_) {} }, Math.max(5000, def.duration));
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function showTransitionAlert(stage, detail = '', { preview = false, audio = true, system = true } = {}) {
     const settings = loadSettings();
     const visualAllowed = preview || stageEnabled(stage, settings);
     const audioAllowed = audio && (preview || audioStageEnabled(stage, settings));
-    if (!visualAllowed && !audioAllowed) return;
+    const systemAllowed = system && (preview || notificationStageEnabled(stage, settings));
+    if (!visualAllowed && !audioAllowed && !systemAllowed) return;
     const def = alertDefinition(stage, detail);
     if (!def) return;
     if (audioAllowed) void playStageAudio(stage, { preview });
+    if (systemAllowed) sendSystemNotification(stage, detail, { preview });
     if (!visualAllowed) return;
     closeTransitionAlert();
     const node = document.createElement('div');
@@ -444,6 +516,18 @@
         <label class="frt-volume-row"><span>Repeat after <b class="frt-repeat-value">${Math.max(10, Math.min(30, Number(settings.attackRepeatDelaySeconds) || 15))}s</b></span><input type="range" min="10" max="30" step="5" data-setting="attackRepeatDelaySeconds" value="${Math.max(10, Math.min(30, Number(settings.attackRepeatDelaySeconds) || 15))}"></label>
         <small>The repeat is cancelled immediately when you are no longer in ATTACK NOW. It fires at most once per attack window.</small>
       </div>
+      <div class="frt-settings-section"><strong>SYSTEM / DEVICE NOTIFICATIONS</strong>
+        <label><span>Enable system notifications</span><input type="checkbox" data-setting="systemNotifications" ${settings.systemNotifications ? 'checked' : ''}></label>
+        <label><span>Only when Torn is in the background</span><input type="checkbox" data-setting="notifyOnlyWhenHidden" ${settings.notifyOnlyWhenHidden ? 'checked' : ''}></label>
+        <label><span>Readiness / unavailable</span><input type="checkbox" data-setting="notifyReadiness" ${settings.notifyReadiness ? 'checked' : ''}></label>
+        <label><span>GET READY</span><input type="checkbox" data-setting="notifyGetReady" ${settings.notifyGetReady ? 'checked' : ''}></label>
+        <label><span>YOU'RE NEXT</span><input type="checkbox" data-setting="notifyNext" ${settings.notifyNext ? 'checked' : ''}></label>
+        <label><span>UP NOW</span><input type="checkbox" data-setting="notifyUpNow" ${settings.notifyUpNow ? 'checked' : ''}></label>
+        <label><span>ATTACK NOW</span><input type="checkbox" data-setting="notifyAttackNow" ${settings.notifyAttackNow ? 'checked' : ''}></label>
+        <div class="frt-preview-grid"><button type="button" class="frt-notify-permission">ENABLE / CHECK</button><button type="button" class="frt-notify-test">TEST NOTIFICATION</button></div>
+        <small class="frt-notify-status">Notification status: ${notificationPermissionLabel()}.</small>
+        <small>System notifications are off by default. Browser/TornPDA support varies; the test button confirms what the current device permits.</small>
+      </div>
       <div class="frt-settings-section"><strong>PREVIEW / TEST ALERTS</strong><div class="frt-preview-grid"><button data-preview="get_ready">GET READY</button><button data-preview="next">YOU'RE NEXT</button><button data-preview="up_now">UP NOW</button><button data-preview="attack_now">ATTACK NOW</button><button data-preview="blocked">NOT READY</button><button data-preview="return_ready">RETURN READY</button></div><small>Preview buttons show the visual alert and play that stage's sound even if audio alerts are currently disabled.</small></div>
       <div class="frt-settings-actions"><button type="button" class="frt-settings-cancel">CANCEL</button><button type="button" class="frt-settings-save">SAVE</button></div>
     </div>`;
@@ -468,10 +552,20 @@
     const repeatValue = modal.querySelector('.frt-repeat-value');
     repeatInput?.addEventListener('input', () => { if (repeatValue) repeatValue.textContent = `${repeatInput.value}s`; });
     const audioStatus = modal.querySelector('.frt-audio-status');
+    const notifyStatus = modal.querySelector('.frt-notify-status');
+    modal.querySelector('.frt-notify-permission')?.addEventListener('click', async () => {
+      const granted = await requestSystemNotificationPermission();
+      if (notifyStatus) notifyStatus.textContent = `Notification status: ${granted ? 'ready' : notificationPermissionLabel()}.`;
+    });
+    modal.querySelector('.frt-notify-test')?.addEventListener('click', async () => {
+      const granted = await requestSystemNotificationPermission();
+      const sent = granted && sendSystemNotification('next', 'Test notification from Faction War Coordinator.', { preview: true });
+      if (notifyStatus) notifyStatus.textContent = sent ? 'Notification status: test sent.' : `Notification status: ${notificationPermissionLabel()}.`;
+    });
     modal.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', async () => {
       const audioReady = await primeAudio();
       if (audioStatus) audioStatus.textContent = audioReady ? 'Audio test status: ready.' : 'Audio test status: blocked or unavailable on this page/device.';
-      showTransitionAlert(button.dataset.preview, '', { preview: true, audio: true });
+      showTransitionAlert(button.dataset.preview, '', { preview: true, audio: true, system: false });
     }));
     modal.addEventListener('pointerdown', event => { if (event.target === modal) closeSettings(); });
   }
