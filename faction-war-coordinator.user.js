@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.15.3
+// @version      0.15.4
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -400,12 +400,12 @@
     const current = viewerOperationalStage();
     if (!alertBaselineInitialized) {
       alertBaselineInitialized = true;
-      const stored = storedAlertStage();
-      lastAlertStage = stored === undefined ? current.stage : stored;
+      // Always baseline to the state observed by this live script instance.
+      // Do not seed lastAlertStage from sessionStorage: a stale stored stage
+      // can make a resize/PDA reinjection look like a new transition on the
+      // very next timer tick. Genuine alerts begin only after this baseline.
+      lastAlertStage = current.stage;
       rememberAlertStage(current.stage);
-      // A page/layout reinjection must never turn an unchanged status into a
-      // fresh alert. Only a real Coordinator state transition after baseline
-      // initialization is allowed to notify the user.
       return;
     }
     if (current.stage === lastAlertStage) return;
@@ -859,7 +859,7 @@
       }
     }
 
-    evaluateAlertTransition();
+    if (options.evaluateAlerts !== false) evaluateAlertTransition();
     return previousView !== viewStateSignature();
   }
 
@@ -870,7 +870,10 @@
       const age = Date.now() - Number(cached.saved_at);
       if (!Number.isFinite(age) || age < 0 || age > CACHE_MAX_AGE_MS) return false;
 
-      applyState(cached.data, { persist: false });
+      // Cached state is display-only during boot. It must never establish an
+      // alert baseline because it may be stale relative to the first live poll.
+      // The first successful live response establishes the baseline silently.
+      applyState(cached.data, { persist: false, evaluateAlerts: false });
       lastSuccessAt = Number(cached.saved_at);
       return true;
     } catch (_) {
@@ -1151,7 +1154,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.13.1`,
+      `Version: 0.15.4`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
