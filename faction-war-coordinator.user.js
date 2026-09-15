@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.15.2
+// @version      0.15.3
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -1555,12 +1555,13 @@
       @media (max-width:720px) {
         #${ROOT_ID} .frt-bar { display:none; }
         #${ROOT_ID} .frt-compact { display:grid; grid-template-rows:auto auto auto; width:100%; min-width:0; }
-        #${ROOT_ID} .frt-compact-top { display:grid; grid-template-columns:minmax(100px,1fr) auto auto auto; align-items:stretch; min-height:34px; border-bottom:1px solid var(--border); }
+        #${ROOT_ID} .frt-compact-top { display:grid; grid-template-columns:minmax(88px,1fr) auto auto auto auto; align-items:stretch; min-height:34px; border-bottom:1px solid var(--border); }
         #${ROOT_ID} .frt-compact-brand { display:flex; align-items:center; gap:5px; min-width:0; padding:3px 7px; font-size:9px; font-weight:900; white-space:nowrap; }
         #${ROOT_ID} .frt-compact-brand .frt-live { flex:0 0 7px; width:7px; height:7px; }
         #${ROOT_ID} .frt-compact-timer-value { color:#f3f5f7; font-size:9px; font-variant-numeric:tabular-nums; }
-        #${ROOT_ID} .frt-compact-top button { min-width:0; height:34px; padding:0 8px; border:0; border-left:1px solid var(--border); border-radius:0; color:white; font-size:8px; font-weight:900; cursor:pointer; white-space:nowrap; }
+        #${ROOT_ID} .frt-compact-top button { min-width:0; height:34px; padding:0 6px; border:0; border-left:1px solid var(--border); border-radius:0; color:white; font-size:8px; font-weight:900; cursor:pointer; white-space:nowrap; }
         #${ROOT_ID} .frt-compact-settings { background:#2a3036; }
+        #${ROOT_ID} .frt-compact-off { background:#20252a; color:#b9c0c7; }
         #${ROOT_ID} .frt-compact-skip { background:#66551e; }
         #${ROOT_ID} .frt-compact-return { background:#285f73; }
         #${ROOT_ID} .frt-compact-leave { background:#653535; }
@@ -1781,6 +1782,7 @@
       <div class="frt-compact-top">
         <div class="frt-compact-brand" title="${esc(lastError)}"><span class="frt-live"></span><span>ROTATION</span><span>•</span><span class="frt-compact-timer-value">${esc(formatChain(currentChainSeconds()))}</span></div>
         <button type="button" class="frt-compact-settings">SETTINGS</button>
+        <button type="button" class="frt-compact-off">OFF</button>
         ${compactPrimaryAction || '<span></span>'}
         ${compactSecondaryAction || '<span></span>'}
       </div>
@@ -1815,7 +1817,7 @@
     });
     root.querySelector('.frt-settings-button')?.addEventListener('click', openSettings);
     root.querySelector('.frt-compact-settings')?.addEventListener('click', openSettings);
-    root.querySelector('.frt-off').addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); cancelAttackRepeat(); setEnabled(false); stopPolling(); render(); });
+    root.querySelectorAll('.frt-off, .frt-compact-off').forEach(button => button.addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); cancelAttackRepeat(); setEnabled(false); stopPolling(); render(); }));
   }
 
   function startPolling() {
