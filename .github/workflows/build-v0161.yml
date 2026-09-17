@@ -1,0 +1,32 @@
+name: Build v0.16.1 userscript package
+
+on:
+  push:
+    paths:
+      - 'tools/build_v0161.py'
+      - '.github/workflows/build-v0161.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build v0.16.1
+        run: python tools/build_v0161.py
+      - name: Validate userscript
+        run: |
+          node --check MWC-Torn-Remote-Bridge-v0.16.1/faction-war-coordinator.user.js
+          grep -q '@version      0.16.1' MWC-Torn-Remote-Bridge-v0.16.1/faction-war-coordinator.user.js
+          test "$(grep -o '###PDA-APIKEY###' MWC-Torn-Remote-Bridge-v0.16.1/faction-war-coordinator.user.js | wc -l)" -eq 1
+          grep -q 'READINESS_ALERT_STABILITY_MS = 3500' MWC-Torn-Remote-Bridge-v0.16.1/faction-war-coordinator.user.js
+          grep -q 'frt-off-label' MWC-Torn-Remote-Bridge-v0.16.1/faction-war-coordinator.user.js
+      - name: Package
+        run: zip -r MWC-Torn-Remote-Bridge-v0.16.1.zip MWC-Torn-Remote-Bridge-v0.16.1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MWC-Torn-Remote-Bridge-v0.16.1
+          path: MWC-Torn-Remote-Bridge-v0.16.1.zip
