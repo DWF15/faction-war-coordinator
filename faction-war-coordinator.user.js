@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.16.0
+// @version      0.16.2
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -75,6 +75,9 @@
   let audioContext = null;
   let audioRunId = 0;
   let attackRepeatTimer = null;
+  let pendingReadinessSignature = null;
+  let pendingReadinessCount = 0;
+  const READINESS_CONFIRMATIONS = 2;
 
   const enabled = () => localStorage.getItem(KEY_ENABLED) !== 'false';
   const setEnabled = v => localStorage.setItem(KEY_ENABLED, String(v));
@@ -397,26 +400,46 @@
     try { sessionStorage.setItem(ALERT_STAGE_KEY, stage || ''); } catch (_) {}
   }
 
-  function evaluateAlertTransition({ rerender = false } = {}) {
+  function evaluateAlertTransition({ source = 'api' } = {}) {
     if (authRequired || !apiOnline) return;
+    if (source !== 'api') return;
     const current = viewerOperationalStage();
     if (!alertBaselineInitialized) {
       alertBaselineInitialized = true;
-      // Always baseline to the state observed by this live script instance.
-      // Do not seed lastAlertStage from sessionStorage: a stale stored stage
-      // can make a resize/PDA reinjection look like a new transition on the
-      // very next timer tick. Genuine alerts begin only after this baseline.
       lastAlertStage = current.stage;
       rememberAlertStage(current.stage);
+      pendingReadinessSignature = null;
+      pendingReadinessCount = 0;
       return;
     }
-    if (current.stage === lastAlertStage) return;
+    if (current.stage === lastAlertStage) {
+      pendingReadinessSignature = null;
+      pendingReadinessCount = 0;
+      return;
+    }
+
+    // NOT READY / RETURN READY must be confirmed by two consecutive fresh
+    // Coordinator responses. Viewport changes, timer ticks, cached state and
+    // Torn responsive reflow can never create these alerts on their own.
+    const requiresConfirmation = current.stage === 'blocked' || current.stage === 'return_ready';
+    if (requiresConfirmation) {
+      const signature = `${current.stage}|${String(current.detail || '').trim().toUpperCase()}`;
+      if (pendingReadinessSignature !== signature) {
+        pendingReadinessSignature = signature;
+        pendingReadinessCount = 1;
+        return;
+      }
+      pendingReadinessCount += 1;
+      if (pendingReadinessCount < READINESS_CONFIRMATIONS) return;
+    }
+
+    pendingReadinessSignature = null;
+    pendingReadinessCount = 0;
     cancelAttackRepeat();
     lastAlertStage = current.stage;
     rememberAlertStage(current.stage);
     if (current.stage && alertClaim(current.stage, current.detail)) showTransitionAlert(current.stage, current.detail);
     if (current.stage === 'attack_now') armAttackRepeat();
-    if (rerender && document.getElementById(ROOT_ID)) render();
   }
 
   function alertClaim(stage, detail = '') {
@@ -678,7 +701,6 @@
     const compactTimer = document.querySelector(`#${ROOT_ID} .frt-compact-timer-value`);
     if (compactTimer) compactTimer.textContent = value;
     if (!timer && !compactTimer) return;
-    evaluateAlertTransition({ rerender: true });
   }
 
   function scheduleChainTick() {
@@ -933,7 +955,7 @@
       }
     }
 
-    if (options.evaluateAlerts !== false) evaluateAlertTransition();
+    if (options.evaluateAlerts !== false) evaluateAlertTransition({ source: 'api' });
     return previousView !== viewStateSignature();
   }
 
@@ -1228,7 +1250,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.16.0`,
+      `Version: 0.16.2`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -1590,11 +1612,15 @@
       #${SETTINGS_ID} .frt-settings-actions button { min-height:35px; border:1px solid #454b53; border-radius:5px; color:white; font-size:10px; font-weight:900; cursor:pointer; }
       #${SETTINGS_ID} .frt-settings-cancel { background:#292e34; }
       #${SETTINGS_ID} .frt-settings-save { background:#2e7d4c; }
-      #${OFF_BUTTON_ID} { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; min-width:26px; margin-left:5px; padding:0; border:1px solid rgba(255,255,255,.12); border-radius:4px; background:rgba(12,15,18,.90); color:#e8edf1; cursor:pointer; box-sizing:border-box; vertical-align:middle; }
-      #${OFF_BUTTON_ID} svg { width:20px; height:20px; display:block; } #${OFF_BUTTON_ID} .frt-chain { stroke:#cfd3d6; } #${OFF_BUTTON_ID} .frt-rotate { stroke:#55c95f; }
-      #${OFF_BUTTON_ID}:hover { background:rgba(255,255,255,.08); border-color:rgba(85,201,95,.75); box-shadow:0 0 8px rgba(85,201,95,.28); }
+      #${OFF_BUTTON_ID} { display:flex; align-items:center; gap:7px; min-height:30px; padding:0 9px; border:1px solid #3a4047; border-radius:3px; background:linear-gradient(180deg,#353535,#292929); color:#f0f0f0; box-shadow:0 1px 2px rgba(0,0,0,.38); cursor:pointer; box-sizing:border-box; font:700 11px/1 Arial,Helvetica,sans-serif; text-align:left; }
+      #${OFF_BUTTON_ID} .frt-off-live { width:8px; height:8px; flex:0 0 8px; border-radius:50%; background:#49d17d; box-shadow:0 0 7px rgba(73,209,125,.55); }
+      #${OFF_BUTTON_ID} .frt-off-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      #${OFF_BUTTON_ID} .frt-off-state { color:#aab1b8; font-size:9px; font-weight:800; }
+      #${OFF_BUTTON_ID}:hover { background:linear-gradient(180deg,#414141,#303030); border-color:#59616a; }
       #${OFF_BUTTON_ID}:focus-visible { outline:1px solid #55c95f; outline-offset:2px; }
-      #${OFF_BUTTON_ID}.frt-header-fallback { position:fixed; top:8px; right:8px; z-index:1000010; margin:0; }
+      #${OFF_BUTTON_ID}.frt-off-wide { position:static; width:100%; margin:6px 0; }
+      #${OFF_BUTTON_ID}.frt-off-narrow { position:sticky; top:0; z-index:999990; width:100%; min-height:28px; margin:0; padding:0 10px; border-width:0 0 1px; border-radius:0; background:rgba(31,34,37,.985); }
+      #${OFF_BUTTON_ID}.frt-off-narrow .frt-off-state { margin-left:auto; }
 
       #${ROOT_ID}.frt-can-manage .frt-brand, #${ROOT_ID}.frt-can-manage .frt-compact-brand { cursor:pointer; }
       #${ROOT_ID}.frt-can-manage .frt-brand:hover, #${ROOT_ID}.frt-can-manage .frt-compact-brand:hover { background:rgba(85,170,255,.08); }
@@ -1853,15 +1879,40 @@
     return candidates[0] || null;
   }
 
+  function syncOffButtonPlacement() {
+    const btn = document.getElementById(OFF_BUTTON_ID);
+    if (!btn) return;
+    const narrow = window.innerWidth <= 1000;
+    if (narrow) {
+      btn.classList.remove('frt-off-wide');
+      btn.classList.add('frt-off-narrow');
+      if (btn.parentElement !== document.body || document.body.firstElementChild !== btn) document.body.prepend(btn);
+      return;
+    }
+
+    btn.classList.remove('frt-off-narrow');
+    btn.classList.add('frt-off-wide');
+    const sidebar = document.querySelector('#sidebarroot');
+    if (sidebar) {
+      // Mount inside Torn's actual sidebar so the control follows the same
+      // centered layout as Addiction Watch instead of using viewport pixels.
+      if (btn.parentElement !== sidebar) sidebar.prepend(btn);
+    } else if (btn.parentElement !== document.body) {
+      document.body.prepend(btn);
+    }
+  }
+
   function mountOffButton() {
     document.getElementById(OFF_BUTTON_ID)?.remove();
     const btn = document.createElement('button');
-    btn.id = OFF_BUTTON_ID; btn.type = 'button'; btn.title = 'Enable Rotation'; btn.setAttribute('aria-label','Enable Rotation');
-    btn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="frt-rotate" d="M5 8.2a8 8 0 0 1 12.8-2.1" fill="none" stroke-width="1.8" stroke-linecap="round"/><path class="frt-rotate" d="M17.8 3.9l.4 3.7-3.7-.3" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path class="frt-rotate" d="M19 15.8a8 8 0 0 1-12.8 2.1" fill="none" stroke-width="1.8" stroke-linecap="round"/><path class="frt-rotate" d="M6.2 20.1l-.4-3.7 3.7.3" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path class="frt-chain" d="M9.1 14.9l-1.2 1.2a3 3 0 0 1-4.2-4.2l2.2-2.2a3 3 0 0 1 4.2 0" fill="none" stroke-width="2.1" stroke-linecap="round"/><path class="frt-chain" d="M14.9 9.1l1.2-1.2a3 3 0 1 1 4.2 4.2l-2.2 2.2a3 3 0 0 1-4.2 0" fill="none" stroke-width="2.1" stroke-linecap="round"/><path class="frt-chain" d="M8.6 15.4l6.8-6.8" fill="none" stroke-width="2.1" stroke-linecap="round"/></svg>`;
+    btn.id = OFF_BUTTON_ID;
+    btn.type = 'button';
+    btn.title = 'Enable Rotation';
+    btn.setAttribute('aria-label', 'Enable Rotation');
+    btn.innerHTML = `<span class="frt-off-live"></span><span class="frt-off-label">ROTATION</span><span class="frt-off-state">OFF</span>`;
     btn.addEventListener('click', () => { setEnabled(true); render(); requestState(); startPolling(); });
-    const profile = findTornProfileControl();
-    if (profile) (profile.closest('li') || profile).insertAdjacentElement('afterend', btn);
-    else { document.body.appendChild(btn); btn.classList.add('frt-header-fallback'); }
+    document.body.prepend(btn);
+    syncOffButtonPlacement();
   }
 
   function render() {
@@ -1986,6 +2037,8 @@
       if (!document.getElementById(ROOT_ID)) render();
     } else if (!document.getElementById(OFF_BUTTON_ID)) {
       mountOffButton();
+    } else {
+      syncOffButtonPlacement();
     }
   }
 
