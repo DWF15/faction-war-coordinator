@@ -1,0 +1,34 @@
+name: Build v0.16.2 userscript package
+
+on:
+  push:
+    paths:
+      - 'tools/build_v0162.py'
+      - '.github/workflows/build-v0162.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build v0.16.2
+        run: python tools/build_v0162.py
+      - name: Validate userscript
+        run: |
+          node --check MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+          grep -q '@version      0.16.2' MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+          test "$(grep -o '###PDA-APIKEY###' MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js | wc -l)" -eq 1
+          grep -q "if (source !== 'api') return;" MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+          grep -q 'READINESS_CONFIRMATIONS = 2' MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+          grep -q 'syncOffButtonPlacement' MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+          ! grep -q 'window.scrollTo' MWC-Torn-Remote-Bridge-v0.16.2/faction-war-coordinator.user.js
+      - name: Package
+        run: zip -r MWC-Torn-Remote-Bridge-v0.16.2.zip MWC-Torn-Remote-Bridge-v0.16.2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MWC-Torn-Remote-Bridge-v0.16.2
+          path: MWC-Torn-Remote-Bridge-v0.16.2.zip
