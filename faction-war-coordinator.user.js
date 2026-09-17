@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.15.4
+// @version      0.16.0
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -23,6 +23,7 @@
   const ROOT_ID = 'frt-root';
   const OVERLAY_ID = 'frt-player-overlay';
   const ROTATION_EDITOR_ID = 'frt-rotation-editor';
+  const ROTATION_OVERVIEW_ID = 'frt-rotation-overview';
   const STYLE_ID = 'frt-style';
   const OFF_BUTTON_ID = 'frt-header-enable';
   const SETTINGS_ID = 'frt-settings';
@@ -119,6 +120,7 @@
   }
 
   function closeSettings() { document.getElementById(SETTINGS_ID)?.remove(); }
+  function closeRotationOverview() { document.getElementById(ROTATION_OVERVIEW_ID)?.remove(); }
   function closeTransitionAlert() {
     document.getElementById(ALERT_ID)?.remove();
     if (alertHideTimer !== null) window.clearTimeout(alertHideTimer);
@@ -484,6 +486,78 @@
     const skipped = viewerIsSkipped();
     const state = [ordinal(place), skipped ? 'SKIPPED' : '', status].filter(Boolean).join(' · ');
     return `<button type="button" class="frt-compact-me" data-rotation-id="${esc(member.rotationUserId)}"><span class="frt-compact-me-name">${esc(member.name)}</span>${readinessIndicatorHTML(member)}<span class="frt-compact-you">YOU</span><span class="frt-compact-me-state">${esc(state)}</span></button>`;
+  }
+
+
+  function overviewRoleLabel(member, index) {
+    if (member.role === 'up') return 'UP NOW';
+    if (member.role === 'on-deck') return 'ON DECK';
+    if (member.role === 'in-hole') return 'IN THE HOLE';
+    return `POSITION ${index + 1}`;
+  }
+
+  function overviewStatus(member) {
+    const rs = String(member.rotationStatus || '').toLowerCase();
+    if (rs === 'skip' || rs === 'away') return { label: isHospitalizedMember(member) ? 'SKIPPED · HOSPITALIZED' : 'SKIPPED', kind: 'paused' };
+    if (isHospitalizedMember(member)) return { label: 'HOSPITALIZED', kind: 'danger' };
+    const status = String(member.status || '').trim();
+    if (status && !/^okay$|^ready$/i.test(status)) return { label: status.toUpperCase(), kind: 'warning' };
+    if (member.energy !== null && member.energy !== undefined && Number(member.energy) < 25) return { label: 'NO ATTACK ENERGY', kind: 'danger' };
+    if (member.energy !== null && member.energy !== undefined && Number(member.energy) < 50) return { label: 'ONE ATTACK', kind: 'warning' };
+    return { label: 'READY', kind: 'ready' };
+  }
+
+  function overviewEnergyClass(member) {
+    if (member.energy === null || member.energy === undefined || member.energy === '') return 'unknown';
+    const energy = Number(member.energy) || 0;
+    if (energy >= 100) return 'full';
+    if (energy >= 50) return 'half';
+    if (energy >= 25) return 'low';
+    return 'empty';
+  }
+
+  function openRotationOverview() {
+    if (!canManageRotation) return;
+    closeRotationOverview();
+    closeOverlay();
+    closeSettings();
+
+    const total = rotation.length;
+    const skipped = rotation.filter(m => ['skip','away'].includes(String(m.rotationStatus || '').toLowerCase())).length;
+    const hospitalized = rotation.filter(isHospitalizedMember).length;
+    const noEnergy = rotation.filter(m => !isHospitalizedMember(m) && m.energy !== null && m.energy !== undefined && Number(m.energy) < 25).length;
+    const ready = rotation.filter(m => {
+      const s = overviewStatus(m);
+      return s.kind === 'ready' || (s.kind === 'warning' && s.label === 'ONE ATTACK');
+    }).length;
+
+    const rows = rotation.map((member, index) => {
+      const state = overviewStatus(member);
+      const energyText = member.energy === null || member.energy === undefined ? '—' : String(member.energy);
+      const healthText = member.health === null || member.health === undefined ? '—' : `${member.health}%`;
+      return `<div class="frt-ro-row frt-ro-${state.kind}">
+        <span class="frt-ro-pos">${index + 1}</span>
+        <span class="frt-ro-member"><span class="frt-ro-name">${esc(member.name)}</span>${readinessIndicatorHTML(member)}<small>${esc(overviewRoleLabel(member, index))}</small></span>
+        <span class="frt-ro-energy frt-ro-energy-${overviewEnergyClass(member)}"><small>ENERGY</small><strong>${esc(energyText)}</strong></span>
+        <span class="frt-ro-health"><small>HEALTH</small><strong>${esc(healthText)}</strong></span>
+        <span class="frt-ro-status"><small>STATUS</small><strong>${esc(state.label)}</strong></span>
+        <span class="frt-ro-target"><small>TARGET</small><strong>${esc(member.target || '—')}</strong></span>
+      </div>`;
+    }).join('');
+
+    const modal = document.createElement('div');
+    modal.id = ROTATION_OVERVIEW_ID;
+    modal.innerHTML = `<div class="frt-ro-card" role="dialog" aria-modal="true" aria-label="Full Rotation Overview">
+      <div class="frt-ro-head"><div><strong>FULL ROTATION OVERVIEW</strong><small>Coordinator / leader view · live Coordinator data</small></div><button type="button" class="frt-ro-close" aria-label="Close">×</button></div>
+      <div class="frt-ro-summary"><span>${total} TOTAL</span><span class="frt-ro-ready">${ready} READY</span><span>${skipped} SKIPPED</span><span class="frt-ro-danger">${hospitalized} HOSPITAL</span><span class="frt-ro-danger">${noEnergy} &lt;25E</span></div>
+      <div class="frt-ro-columns"><span>#</span><span>MEMBER</span><span>ENERGY</span><span>HEALTH</span><span>STATUS</span><span>TARGET</span></div>
+      <div class="frt-ro-list">${rows || '<div class="frt-ro-empty">Rotation is empty.</div>'}</div>
+      <div class="frt-ro-foot"><span>Updated automatically with the normal Coordinator poll.</span><button type="button" class="frt-ro-change">CHANGE ROTATION</button></div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('.frt-ro-close')?.addEventListener('click', closeRotationOverview);
+    modal.querySelector('.frt-ro-change')?.addEventListener('click', () => { closeRotationOverview(); openRotationEditor(); });
+    modal.addEventListener('pointerdown', event => { if (event.target === modal) closeRotationOverview(); });
   }
 
   function openSettings() {
@@ -1154,7 +1228,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.15.4`,
+      `Version: 0.16.0`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -1391,9 +1465,11 @@
           const data = JSON.parse(response.responseText || '{}');
           if (response.status === 401 || data.auth_required) { recordAuthDiagnostic(response, data); render(); return; }
           if (response.status < 200 || response.status >= 300) throw new Error(data.error || `HTTP ${response.status}`);
+          const overviewWasOpen = Boolean(document.getElementById(ROTATION_OVERVIEW_ID));
           const viewChanged = applyState(data);
           if (viewChanged || !document.getElementById(ROOT_ID)) render();
           else updateChainTimerDisplay();
+          if (overviewWasOpen && canManageRotation) openRotationOverview();
         } catch (err) {
           handleReadFailure(String(err?.message || err));
         }
@@ -1519,6 +1595,43 @@
       #${OFF_BUTTON_ID}:hover { background:rgba(255,255,255,.08); border-color:rgba(85,201,95,.75); box-shadow:0 0 8px rgba(85,201,95,.28); }
       #${OFF_BUTTON_ID}:focus-visible { outline:1px solid #55c95f; outline-offset:2px; }
       #${OFF_BUTTON_ID}.frt-header-fallback { position:fixed; top:8px; right:8px; z-index:1000010; margin:0; }
+
+      #${ROOT_ID}.frt-can-manage .frt-brand, #${ROOT_ID}.frt-can-manage .frt-compact-brand { cursor:pointer; }
+      #${ROOT_ID}.frt-can-manage .frt-brand:hover, #${ROOT_ID}.frt-can-manage .frt-compact-brand:hover { background:rgba(85,170,255,.08); }
+      #${ROTATION_OVERVIEW_ID} { position:fixed; inset:0; z-index:1000018; display:grid; place-items:start center; padding:68px 10px 18px; background:rgba(0,0,0,.62); font-family:Arial,Helvetica,sans-serif; box-sizing:border-box; }
+      #${ROTATION_OVERVIEW_ID} * { box-sizing:border-box; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-card { width:min(920px,100%); max-height:calc(100vh - 86px); overflow:auto; background:#171b1f; color:#f3f5f7; border:1px solid #454b53; border-radius:9px; box-shadow:0 14px 42px rgba(0,0,0,.66); padding:12px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-bottom:9px; border-bottom:1px solid #3a4047; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-head strong { font-size:15px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-head small { display:block; margin-top:2px; color:#9fa7af; font-size:9px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-close { border:0; background:transparent; color:#aab1b8; font-size:21px; cursor:pointer; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-summary { display:flex; flex-wrap:wrap; gap:6px; padding:9px 0; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-summary span { padding:4px 7px; border:1px solid #3d444c; border-radius:4px; background:#22272c; color:#c8cdd2; font-size:8px; font-weight:900; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-summary .frt-ro-ready { color:#72e39b; border-color:rgba(73,209,125,.45); }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-summary .frt-ro-danger { color:#ff8b8b; border-color:rgba(255,107,107,.45); }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-columns, #${ROTATION_OVERVIEW_ID} .frt-ro-row { display:grid; grid-template-columns:36px minmax(145px,1.5fr) 74px 72px minmax(115px,1fr) minmax(130px,1.25fr); gap:8px; align-items:center; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-columns { padding:5px 7px; color:#808891; font-size:7px; font-weight:900; letter-spacing:.07em; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-list { display:grid; gap:5px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-row { min-height:47px; padding:6px 7px; border:1px solid #343b42; border-left:4px solid #4b5259; border-radius:5px; background:#20252a; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-danger { border-left-color:#ff6b6b; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-warning { border-left-color:#e8c94f; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-ready { border-left-color:#49d17d; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-paused { border-left-color:#8b939a; opacity:.83; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-pos { color:#969ea6; font-size:12px; font-weight:900; text-align:center; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-member { min-width:0; display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-name { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:900; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-member small { flex-basis:100%; color:#89929a; font-size:7px; font-weight:900; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-row small { display:block; margin-bottom:1px; color:#7f8890; font-size:6px; font-weight:900; letter-spacing:.05em; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-row strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-energy-full strong { color:#72e39b; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-energy-half strong { color:#efd568; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-energy-low strong { color:#ee994e; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-energy-empty strong { color:#ff7c7c; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-status strong { white-space:normal; line-height:1.15; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; padding-top:9px; border-top:1px solid #343a40; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-foot span { color:#818a92; font-size:8px; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-change { min-height:32px; padding:0 12px; border:1px solid #4a5159; border-radius:5px; background:#2a3036; color:white; font-size:9px; font-weight:900; cursor:pointer; }
+      #${ROTATION_OVERVIEW_ID} .frt-ro-empty { padding:20px; color:#9fa7af; text-align:center; font-size:11px; }
       #${OVERLAY_ID} { --border:#454b53; --text:#f3f5f7; --muted:#aab1b8; position:fixed; z-index:1000005; width:min(330px,calc(100vw - 20px)); background:#191c20; color:var(--text); border:1px solid var(--border); border-radius:8px; box-shadow:0 10px 35px rgba(0,0,0,.58); font-family:Arial,Helvetica,sans-serif; padding:11px; box-sizing:border-box; }
       #${OVERLAY_ID} .frt-ov-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding-bottom:7px; border-bottom:1px solid var(--border); }
       #${OVERLAY_ID} .frt-ov-head strong { font-size:15px; } #${OVERLAY_ID} .frt-close { border:0; background:transparent; color:var(--muted); font-size:18px; cursor:pointer; }
@@ -1591,6 +1704,21 @@
         #${SETTINGS_ID} { padding:104px 7px 10px; }
         #${SETTINGS_ID} .frt-volume-row { grid-template-columns:1fr 110px; }
         #${SETTINGS_ID} input[type="range"] { width:110px; }
+
+        #${ROTATION_OVERVIEW_ID} { padding:102px 6px 10px; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-card { max-height:calc(100vh - 112px); padding:8px; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-columns { display:none; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-row { grid-template-columns:28px minmax(0,1fr) 52px 48px; grid-template-areas:'pos member energy health' 'pos status status status' 'pos target target target'; gap:4px 6px; min-height:66px; padding:6px 5px; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-pos { grid-area:pos; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-member { grid-area:member; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-energy { grid-area:energy; text-align:right; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-health { grid-area:health; text-align:right; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-status { grid-area:status; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-target { grid-area:target; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-status, #${ROTATION_OVERVIEW_ID} .frt-ro-target { display:flex; gap:6px; align-items:baseline; min-width:0; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-status small, #${ROTATION_OVERVIEW_ID} .frt-ro-target small { margin:0; flex:0 0 auto; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-summary { gap:4px; }
+        #${ROTATION_OVERVIEW_ID} .frt-ro-summary span { padding:3px 5px; font-size:7px; }
         #${ROTATION_EDITOR_ID} { padding:104px 8px 12px; }
         #${ROTATION_EDITOR_ID} .frt-editor-card { max-height:calc(100vh - 116px); padding:9px; }
         #${ROTATION_EDITOR_ID} .frt-editor-row { grid-template-columns:22px minmax(0,1fr) auto; min-height:46px; padding:5px 4px; }
@@ -1754,6 +1882,7 @@
     const root = document.createElement('section');
     root.id = ROOT_ID;
     if (!apiOnline) root.classList.add('frt-offline');
+    if (canManageRotation) root.classList.add('frt-can-manage');
     const disabled = writePending || !apiOnline ? 'disabled' : '';
     let actionHtml;
     if (authRequired) {
@@ -1818,6 +1947,15 @@
     root.querySelectorAll('[data-self-action]').forEach(button => {
       button.addEventListener('click', () => rotationAction(button.dataset.selfAction));
     });
+    if (canManageRotation) {
+      root.querySelectorAll('.frt-brand, .frt-compact-brand').forEach(brand => {
+        brand.setAttribute('title', 'Open full rotation overview');
+        brand.setAttribute('role', 'button');
+        brand.setAttribute('tabindex', '0');
+        brand.addEventListener('click', openRotationOverview);
+        brand.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openRotationOverview(); } });
+      });
+    }
     root.querySelector('.frt-settings-button')?.addEventListener('click', openSettings);
     root.querySelector('.frt-compact-settings')?.addEventListener('click', openSettings);
     root.querySelectorAll('.frt-off, .frt-compact-off').forEach(button => button.addEventListener('click', () => { closeRotationEditor(); closeSettings(); closeTransitionAlert(); cancelAttackRepeat(); setEnabled(false); stopPolling(); render(); }));
