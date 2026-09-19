@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.16.3
+// @version      0.16.4
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -1250,7 +1250,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.16.3`,
+      `Version: 0.16.4`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -1992,7 +1992,7 @@
       if (member) openOverlay(member, e.currentTarget);
     }));
     root.querySelectorAll('.frt-link, .frt-diag').forEach(linkOrDiagButton => linkOrDiagButton.addEventListener('click', () => {
-      if (authRequired && pdaDeviceProof) { linkDevice(); return; }
+      if (linkOrDiagButton.classList.contains('frt-link')) { linkDevice(); return; }
       if (authRequired && authDiagnostic) { alert(diagnosticDetails()); return; }
       linkDevice();
     }));
