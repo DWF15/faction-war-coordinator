@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.16.4
+// @version      0.16.5
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -77,6 +77,10 @@
   let attackRepeatTimer = null;
   let pendingReadinessSignature = null;
   let pendingReadinessCount = 0;
+  let overlayGraceTimer = null;
+  let overlayLeaveTimer = null;
+  const OVERLAY_GRACE_MS = 4000;
+  const OVERLAY_LEAVE_MS = 650;
   const READINESS_CONFIRMATIONS = 2;
 
   const enabled = () => localStorage.getItem(KEY_ENABLED) !== 'false';
@@ -1666,6 +1670,9 @@
       #${OVERLAY_ID} .frt-ov-row span:first-child { color:var(--muted); }
       #${OVERLAY_ID} .frt-attack { display:block; margin-top:9px; padding:8px; border-radius:5px; background:#2e7d4c; color:white; text-align:center; text-decoration:none; font-size:11px; font-weight:900; }
       #${OVERLAY_ID} .frt-attack-disabled { background:#343a40; color:#999; pointer-events:none; }
+      #${OVERLAY_ID} .frt-med-actions { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:6px; }
+      #${OVERLAY_ID} .frt-med-actions a { min-height:29px; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); border-radius:4px; background:#252a30; color:var(--text); text-decoration:none; font-size:9px; font-weight:800; }
+      #${OVERLAY_ID} .frt-med-actions a:hover { background:#30363d; border-color:#59616a; }
       #${OVERLAY_ID} .frt-coord-label { margin-top:10px; padding-top:8px; border-top:1px solid var(--border); color:var(--muted); font-size:8px; font-weight:900; letter-spacing:.1em; }
       #${OVERLAY_ID} .frt-admin { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:6px; }
       #${OVERLAY_ID} .frt-admin button { min-height:29px; border:1px solid var(--border); border-radius:4px; background:#252a30; color:var(--text); font-size:9px; font-weight:800; cursor:pointer; }
@@ -1754,7 +1761,15 @@
     document.head.appendChild(s);
   }
 
-  function closeOverlay() { document.getElementById(OVERLAY_ID)?.remove(); }
+  function overlayTapMode() {
+    return typeof PDA_httpGet === 'function' || typeof PDA_httpPost === 'function' || Boolean(window.matchMedia?.('(hover: none), (pointer: coarse)')?.matches);
+  }
+  function clearOverlayTimers() {
+    if (overlayGraceTimer !== null) window.clearTimeout(overlayGraceTimer);
+    if (overlayLeaveTimer !== null) window.clearTimeout(overlayLeaveTimer);
+    overlayGraceTimer = null; overlayLeaveTimer = null;
+  }
+  function closeOverlay() { clearOverlayTimers(); document.getElementById(OVERLAY_ID)?.remove(); }
   function closeRotationEditor() { document.getElementById(ROTATION_EDITOR_ID)?.remove(); }
 
   function openRotationEditor() {
@@ -1834,6 +1849,7 @@
       : '';
     const ov = document.createElement('div');
     ov.id = OVERLAY_ID;
+    ov.dataset.rotationId = String(member.rotationUserId);
     ov.innerHTML = `
       <div class="frt-ov-head"><strong>${esc(member.name)}</strong><button type="button" class="frt-close" aria-label="Close">×</button></div>
       <div class="frt-ov-row"><span>Rotation</span><strong>${esc(roleLabel(member) || 'IN ROTATION')} • ${esc(member.eta)}</strong></div>
@@ -1843,6 +1859,7 @@
       <div class="frt-ov-row"><span>Status</span><strong>${esc(member.status)}</strong></div>
       ${readinessRow}
       ${attack}
+      <div class="frt-med-actions"><a href="https://www.torn.com/factions.php?step=your&type=1#/tab=armoury&start=0&sub=medical">FACTION MEDS</a><a href="https://www.torn.com/item.php#medical-items">MY MEDS</a></div>
       ${canManageRotation ? `<div class="frt-coord-label">COORDINATOR</div><div class="frt-admin"><button type="button" data-coord="rotation" title="Reorder the complete active rotation.">CHANGE ROTATION</button><button type="button" data-coord="move">MOVE</button><button type="button" data-coord="${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'resume' : 'skip'}">${member.rotationStatus === 'skip' || member.rotationStatus === 'away' ? 'RETURN' : 'SKIP'}</button><button type="button" data-coord="remove">REMOVE</button></div>` : ''}`;
     document.body.appendChild(ov);
     const r = anchor.getBoundingClientRect();
@@ -1852,6 +1869,12 @@
     ov.style.left = `${left}px`;
     ov.style.top = `${Math.min(r.bottom + 6, Math.max(8, window.innerHeight - ov.offsetHeight - 8))}px`;
     ov.querySelector('.frt-close').addEventListener('click', closeOverlay);
+    if (!overlayTapMode()) {
+      let graceElapsed = false;
+      overlayGraceTimer = window.setTimeout(() => { graceElapsed = true; overlayGraceTimer = null; }, OVERLAY_GRACE_MS);
+      ov.addEventListener('pointerenter', () => { if (overlayLeaveTimer !== null) window.clearTimeout(overlayLeaveTimer); overlayLeaveTimer = null; });
+      ov.addEventListener('pointerleave', () => { if (!graceElapsed) return; if (overlayLeaveTimer !== null) window.clearTimeout(overlayLeaveTimer); overlayLeaveTimer = window.setTimeout(closeOverlay, OVERLAY_LEAVE_MS); });
+    }
     ov.querySelectorAll('[data-self-action]').forEach(btn => {
       btn.addEventListener('click', () => { closeOverlay(); rotationAction(btn.dataset.selfAction); });
     });
@@ -1919,7 +1942,7 @@
   function render() {
     document.getElementById(ROOT_ID)?.remove();
     document.getElementById(OFF_BUTTON_ID)?.remove();
-    closeOverlay(); addStyles();
+    addStyles();
     if (!enabled()) { mountOffButton(); return; }
 
     const pdaKeyInjected = hasTornPdaApiKey();
@@ -1988,7 +2011,10 @@
       if (url) window.location.assign(url);
     }));
     root.querySelectorAll('.frt-member, .frt-compact-person[data-rotation-id], .frt-compact-me[data-rotation-id]').forEach(btn => btn.addEventListener('click', e => {
-      const member = rotation.find(m => m.rotationUserId === String(e.currentTarget.dataset.rotationId));
+      const rotationId = String(e.currentTarget.dataset.rotationId);
+      const member = rotation.find(m => m.rotationUserId === rotationId);
+      const currentOverlay = document.getElementById(OVERLAY_ID);
+      if (overlayTapMode() && currentOverlay?.dataset.rotationId === rotationId) { closeOverlay(); return; }
       if (member) openOverlay(member, e.currentTarget);
     }));
     root.querySelectorAll('.frt-link, .frt-diag').forEach(linkOrDiagButton => linkOrDiagButton.addEventListener('click', () => {
@@ -2027,7 +2053,7 @@
 
   document.addEventListener('pointerdown', e => {
     const ov = document.getElementById(OVERLAY_ID);
-    if (ov && !ov.contains(e.target) && !e.target.closest?.(`#${ROOT_ID} .frt-member`)) closeOverlay();
+    if (ov && !ov.contains(e.target) && !e.target.closest?.(`#${ROOT_ID} .frt-member, #${ROOT_ID} .frt-compact-person, #${ROOT_ID} .frt-compact-me`)) closeOverlay();
   }, true);
 
   function maintenanceCheck() {
