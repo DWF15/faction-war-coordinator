@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Faction Rotation Ticker
 // @namespace    faction-rotation-ticker
-// @version      0.16.2
+// @version      0.16.3
 // @description  Live Torn ranked-war rotation ticker powered by the Coordinator.
 // @homepageURL  https://github.com/DWF15/faction-war-coordinator
 // @updateURL    https://raw.githubusercontent.com/DWF15/faction-war-coordinator/main/faction-war-coordinator.user.js
@@ -1250,7 +1250,7 @@
     if (!authDiagnostic) return 'No authentication diagnostic has been recorded yet.';
     return [
       'Faction War Coordinator auth diagnostic',
-      `Version: 0.16.2`,
+      `Version: 0.16.3`,
       `Transport: ${authDiagnostic.transport}`,
       `Token present before request: ${authDiagnostic.tokenPresent ? 'yes' : 'no'}`,
       `Token length: ${authDiagnostic.tokenLength}`,
@@ -1278,7 +1278,8 @@
     // request must not destroy the evidence we are trying to inspect.
     clearAuth({ deleteToken: false });
     lastError = diagnosticSummary();
-    if (!authDiagnosticAlerted) {
+    const normalDesktopFirstLink = !token && typeof PDA_httpGet !== 'function' && typeof PDA_httpPost !== 'function';
+    if (!normalDesktopFirstLink && !authDiagnosticAlerted) {
       authDiagnosticAlerted = true;
       setTimeout(() => alert(diagnosticDetails()), 50);
     }
@@ -1937,7 +1938,7 @@
     const disabled = writePending || !apiOnline ? 'disabled' : '';
     let actionHtml;
     if (authRequired) {
-      actionHtml = (pdaDeviceProof || !authDiagnostic)
+      actionHtml = ((!isPdaHost && !authToken()) || pdaDeviceProof || !authDiagnostic)
         ? '<button type="button" class="frt-joinleave frt-join frt-link">LINK</button>'
         : '<button type="button" class="frt-joinleave frt-join frt-diag">DIAG</button>';
     } else if (!joined()) {
@@ -1951,7 +1952,7 @@
     let compactPrimaryAction = '';
     let compactSecondaryAction = '';
     if (authRequired) {
-      compactSecondaryAction = (pdaDeviceProof || !authDiagnostic)
+      compactSecondaryAction = ((!isPdaHost && !authToken()) || pdaDeviceProof || !authDiagnostic)
         ? '<button type="button" class="frt-compact-join frt-link">LINK</button>'
         : '<button type="button" class="frt-compact-join frt-diag">DIAG</button>';
     } else if (!joined()) {
